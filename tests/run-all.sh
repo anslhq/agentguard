@@ -40,6 +40,7 @@ run_test "ledger-append"       "./tests/run-ledger-append.sh"
 run_test "session"             "./tests/run-session.sh"
 run_test "hooks-install"       "./tests/run-hooks-install.sh"
 run_test "lease-evidence"      "./tests/run-lease-evidence.sh"
+run_test "pack-state"          "./tests/run-pack-state.sh"
 
 END=$(date +%s)
 ELAPSED=$((END - START))

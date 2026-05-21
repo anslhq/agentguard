@@ -6,23 +6,46 @@ It sits around tools like Cursor, Claude Code, and Codex and turns risky command
 
 ## Status
 
-**Alpha, in active development.**
+**Alpha, in active development.** [`STATUS.md`](STATUS.md) is the
+clause-by-clause source of truth.
 
-This repository is being prepared in public while the core implementation is still landing. Today it contains:
+The Cursor host path is the primary target and is the most complete:
 
-- a working Zero-based CLI binary shape
-- a documented product/design contract in `CONTEXT.md` and `docs/adr/`
-- a tested vertical slice for parts of `risk`, `verify`, `done`, `classify-stop`, `explain`, and Cursor-style hook responses
+- Live-enforce wiring against the real Cursor hook payload shape (94
+  host-adapter test assertions, including chained commands like
+  `cd /tmp && rm -rf /etc/passwd`, real-world envelope shapes, model-family
+  routing).
+- 8 command-risk classes (CMD002–CMD008) and 5 secret-read classes
+  (SEC001–SEC005) reach the Cursor adapter.
+- Evidence-backed completion lease (`done --finalize` denies on bypass
+  findings, unverified edits since last verify, or missing check-state).
+- Append-only canonical ledger via a patched `std.fs.appendBytes`.
+- Protected-path bypass detection wired through the `afterFileEdit` hook
+  (edits to `AGENTS.md`, `CLAUDE.md`, `.cursor/hooks.json`,
+  `.github/workflows/`, `.agentguard/policy.json`, `.agentguard/checks.json`
+  raise a strong-confidence bypass finding that blocks the next lease).
+- State-aware `pack` that adapts its `next_instruction` to the live state.
+- Real `hooks install --host cursor` that emits a canonical
+  fragment + `jq` merge command for `~/.cursor/hooks.json`.
 
-It does **not** yet fully implement the entire AgentGuard contract described in the docs. In particular, some areas are still partial or stubbed:
+The Claude Code and Codex host paths are **scaffolded** — plugin configs
+exist but the binary doesn't yet route those envelope shapes. Do not enable
+them in those hosts today. See `STATUS.md` for the full state of every
+contract clause.
 
-- full diff-aware verification planning
-- evidence-backed completion lease issuance
-- append-only canonical ledger behavior
-- fully wired Claude Code and Codex runtime adapters
-- real context packing
+### Building from source today (important)
 
-If you want a finished, production-grade guardrail product today, this is not that yet. If you want to follow or contribute to the build-out of that system, this is the right repo.
+This repo's binary depends on a patched Zero compiler (a small set of
+Mach-O direct-backend opcodes that aren't yet in upstream Zero v0.1.3).
+The patches live in a separate vendored compiler tree that is currently
+**not** in this repository, and a reproducible bootstrap path (patch
+file or `scripts/bootstrap.sh`) is still future work.
+
+If you clone this repo and run `./scripts/build.sh` against a stock
+`~/.zero/bin/zero`, you will hit `CGEN004: direct AArch64 Mach-O value
+kind is unsupported`. The opcodes the patches add are documented in
+`STATUS.md` ↳ "Zero compiler bootstrap" so anyone choosing to land them
+upstream knows the surface area.
 
 ## Executive Thesis
 
