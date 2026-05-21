@@ -37,15 +37,30 @@ contract clause.
 
 This repo's binary depends on a patched Zero compiler (a small set of
 Mach-O direct-backend opcodes that aren't yet in upstream Zero v0.1.3).
-The patches live in a separate vendored compiler tree that is currently
-**not** in this repository, and a reproducible bootstrap path (patch
-file or `scripts/bootstrap.sh`) is still future work.
+The patches are organised as two clean, single-concern commits on a
+branch named `agentguard-mach-o-direct-backend` against
+`https://github.com/vercel-labs/zerolang`, suitable for an upstream PR:
 
-If you clone this repo and run `./scripts/build.sh` against a stock
-`~/.zero/bin/zero`, you will hit `CGEN004: direct AArch64 Mach-O value
-kind is unsupported`. The opcodes the patches add are documented in
-`STATUS.md` ↳ "Zero compiler bootstrap" so anyone choosing to land them
-upstream knows the surface area.
+1. **Lower std.mem.eql and path-form std.fs helpers to Mach-O direct backend.**
+   Adds direct-backend lowering for `std.mem.eql`, `std.fs.{exists,
+   isDir, makeDir, remove, removeDir, write, writeBytes, read}` via
+   inline AArch64 plus a runtime shim. No new public APIs.
+
+2. **Add std.fs.appendBytes and std.proc.captureShell.**
+   New stdlib APIs with full IR + checker + Mach-O emit + ELF (append
+   inline; captureShell deliberately CGEN004 on ELF) + runtime + docs
+   + conformance tests.
+
+To rebuild AgentGuard today, you need a sibling checkout of
+upstream zerolang with these two patches applied (alongside this
+repo). A future `scripts/bootstrap.sh` that clones, patches, and
+builds upstream automatically would close that gap. For now the
+patches exist on the branch named above and are documented in
+`STATUS.md` ↳ "Zero compiler bootstrap".
+
+If you run `./scripts/build.sh` against a stock `~/.zero/bin/zero`
+without the patches applied, you'll hit `CGEN004: direct AArch64
+Mach-O value kind is unsupported`.
 
 ## Executive Thesis
 

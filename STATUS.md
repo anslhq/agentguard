@@ -129,27 +129,75 @@ These items will not progress without Zero v0.1.4+ ABI improvements:
 
 ## Zero compiler bootstrap
 
-The vendored `zerolang/` source is gitignored. The binary uses a custom-patched
-compiler that adds these opcodes to the darwin-arm64 Mach-O direct backend:
+The vendored `zerolang/` source is gitignored in this repo. It lives
+alongside agentguard as a separate git checkout of
+`https://github.com/vercel-labs/zerolang`. The patches that make
+AgentGuard's binary buildable are organised as two clean commits on
+a branch named `agentguard-mach-o-direct-backend`, intended for an
+upstream PR. Each commit is single-concern, build-clean, and adds
+its own conformance coverage.
 
-- `IR_VALUE_BYTE_VIEW_EQ` — `std.mem.eql` on byte views
-- `IR_VALUE_FS_EXISTS` (and FS_IS_DIR / FS_MAKE_DIR / FS_REMOVE / FS_REMOVE_DIR)
-- `IR_VALUE_FS_WRITE_PATH` / `IR_VALUE_FS_WRITE_BYTES_PATH`
-- `IR_VALUE_FS_READ_PATH`
-- `IR_VALUE_FS_APPEND_BYTES_PATH`
-- `IR_VALUE_PROC_CAPTURE_SHELL` *(this session)*
+### Commit 1 — Mach-O direct backend support for existing stdlib APIs
 
-The opcodes route to a small C runtime shim at `runtime/zero_runtime.c`
-(already in the tree). Cumulative diff is ~200 LOC across
-`zero/native/zero-c/src/{emit_macho64.c, emit_elf64.c, checker.c, ir.c}`
-and `zero/native/zero-c/include/zero.h`.
+Adds direct-backend lowering for APIs that previously only worked
+through the object backend on darwin-arm64:
 
-**These patches are not yet committed to this repo.** They live in the
-local vendored compiler tree. A reproducible bootstrap path (either a
-`patches/zero-macho-direct-backend.patch` diff or a `scripts/bootstrap.sh`
-that clones + patches + builds upstream) is **future work**. Anyone
-cloning AgentGuard today will hit `CGEN004: direct AArch64 Mach-O value
-kind is unsupported` when building with the stock `~/.zero/bin/zero`.
+- `IR_VALUE_BYTE_VIEW_EQ` — `std.mem.eql` / `std.mem.eqlBytes` /
+  `std.crypto.constantTimeEql`. Inline AArch64 byte-by-byte compare;
+  no runtime shim needed.
+- `IR_VALUE_FS_EXISTS` family — `std.fs.{exists, isDir, makeDir,
+  remove, removeDir}` via `zero_fs_exists(path, len, op)` runtime
+  helper.
+- `IR_VALUE_FS_WRITE_PATH` / `IR_VALUE_FS_WRITE_BYTES_PATH` —
+  `std.fs.{write, writeBytes}` via `zero_fs_write_path`.
+- `IR_VALUE_FS_READ_PATH` — `std.fs.read(path, buf)` via
+  `zero_fs_read_path`.
+
+The runtime shim functions live in
+`zerolang/native/zero-c/runtime/zero_runtime.c` (upstream's runtime),
+with declarations in `zero_runtime.h`. Windows is stubbed to return
+0 honestly.
+
+### Commit 2 — New stdlib APIs
+
+Adds two new library functions:
+
+- `std.fs.appendBytes(path, bytes) -> Maybe<usize>` — opens with
+  `O_WRONLY | O_CREAT | O_APPEND`, returns bytes written.
+  - `IR_VALUE_FS_APPEND_BYTES_PATH`
+  - ELF64: inlined open/write/close (analogous to write)
+  - Mach-O direct: routed via `zero_fs_append_path`
+- `std.proc.captureShell(cmdline, buf) -> Maybe<usize>` — runs
+  `/bin/sh -c <cmdline>` via libc `popen()`, captures up to
+  `buf.len` bytes of stdout. Stderr dropped; exit code not
+  returned.
+  - `IR_VALUE_PROC_CAPTURE_SHELL`
+  - ELF64: emits CGEN004 (deliberately unsupported pending an
+    inline fork/exec/pipe or equivalent runtime helper for ELF)
+  - Mach-O direct: routed via `zero_proc_capture_shell`
+
+Conformance tests added at
+`zerolang/conformance/native/pass/std-fs-append.0` and
+`zerolang/conformance/native/pass/std-proc-capture-shell.0`.
+
+### Verification
+
+- Upstream zerolang conformance: **141/141** type-check pass (139
+  existing + 2 new).
+- AgentGuard's own test suite: **15/15** with 0 failures.
+- Compiler builds clean with `-std=c11 -Wall -Wextra -Wpedantic -Os`.
+- Runtime builds clean with the same flags.
+
+### Bootstrap reality today
+
+Cloning AgentGuard alone is still insufficient — the patched
+zerolang isn't vendored or referenced from this repo. To rebuild
+AgentGuard you currently need a sibling checkout of upstream
+zerolang with the two patches applied. A future `scripts/bootstrap.sh`
+that clones zerolang, checks out a known-good commit, applies the
+two patches, and builds the compiler would close that gap. For now
+the patches exist as commits on a branch ready to be force-pushed
+to a fork and turned into a PR.
 
 ---
 
@@ -166,14 +214,14 @@ kind is unsupported` when building with the stock `~/.zero/bin/zero`.
 | `lease-goldens` | 10 | Lease shape + state cache |
 | `done-goldens` | 10 | done plan/finalize + bypass lifecycle |
 | `host-payload-smoke` | 5 | Each host's payload format roundtrip |
-| `host-adapter` | 94 | Full Cursor adapter incl. chained commands, model-family routing, real-payload shapes, SEC inventory |
+| `host-adapter` | 108 | Full Cursor adapter incl. chained commands, model-family routing, real-payload shapes, SEC001-SEC006, JSON-escape parser, mid-chain CMD003 |
 | `ledger-append` | 6 | Real append behavior across separate process invocations |
 | `session` | 13 | session start/current/end + host-flag handling |
-| `hooks-install` | 16 | install/uninstall + 7-event fragment + claude/codex deferred error |
-| `lease-evidence` | 15 | Evidence-backed lease (bypass + edits + check-state gates) |
+| `hooks-install` | 19 | install/uninstall + 7-event fragment + claude/codex deferred error + plugin/binary sync |
+| `lease-evidence` | 18 | Evidence-backed lease + real git-diff sidecar (via std.proc.captureShell) |
 | `pack-state` | 10 | State-aware pack across 6 observable states |
 
-Total: 15 suites, ~210 assertions, 0 failed in ~55s.
+Total: 15 suites, ~230 assertions, 0 failed in ~40s.
 
 ---
 
