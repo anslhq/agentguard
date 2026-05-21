@@ -383,8 +383,11 @@ unrelated Cursor conversations across other projects.
 1. `IR_VALUE_BYTE_VIEW_EQ` — `std.mem.eql` / `std.mem.eqlBytes` / `std.crypto.constantTimeEql` on darwin-arm64 Mach-O. ~55 LOC. Verified 8/8 runtime tests.
 2. `IR_VALUE_FS_EXISTS` / `IR_VALUE_FS_IS_DIR` / `IR_VALUE_FS_MAKE_DIR` / `IR_VALUE_FS_REMOVE` / `IR_VALUE_FS_REMOVE_DIR` — routed through `_zero_fs_exists(path, len, op)` C runtime helper. ~30 LOC emitter + ~20 LOC shim.
 3. `IR_VALUE_FS_WRITE_PATH` — `std.fs.write(path, data)` routed through `_zero_fs_write_path(path, path_len, data, data_len)` C runtime helper. ~30 LOC emitter + ~15 LOC shim.
+4. `IR_VALUE_FS_READ_PATH` — `std.fs.read(path, buf)` via `_zero_fs_read_path`. ~25 LOC emitter + ~20 LOC shim.
+5. `IR_VALUE_FS_APPEND_BYTES_PATH` — `std.fs.appendBytes(path, bytes)` via `_zero_fs_append_path` (popen + O_APPEND|O_CREAT). ~40 LOC emitter + ~15 LOC shim.
+6. `IR_VALUE_PROC_CAPTURE_SHELL` — `std.proc.captureShell(cmdline, buf)` via `_zero_proc_capture_shell` (popen-based). ~40 LOC emitter + ~25 LOC shim.
 
-All patches are in `zerolang/native/zero-c/src/emit_macho64.c`. The runtime shims are in `runtime/zero_runtime.c`. Combined diff is ~150 LOC across the compiler and ~45 LOC in the runtime.
+All patches are in `zerolang/native/zero-c/src/emit_macho64.c`. The runtime shims are in `runtime/zero_runtime.c`. Combined diff is ~220 LOC across the compiler and ~95 LOC in the runtime.
 
 ### Working compiler path (current)
 

@@ -53,7 +53,7 @@ Last updated against the third session of the build (post-audit pass).
 | Risky shell commands → deterministic gate | **verified** | All CMD002–CMD008 reachable from Cursor hook. |
 | Secret-bearing reads → block | **verified** | SEC001–SEC005. |
 | Completion claim → require lease | **verified** | Cursor stop hook in `.agentguard/` repo with no lease and status≠aborted → injects followup_message. |
-| Completion lease → evidence-backed | **verified** | `done --finalize` denies on (bypass-findings OR unverified-edits OR no check-state). |
+| Completion lease → evidence-backed | **verified** | `done --finalize` denies on (bypass-findings OR unverified-edits OR no check-state). Now also captures the real git working-tree diff (`git diff --name-only HEAD; git ls-files --others --exclude-standard`) into `.agentguard/cache/lease-diff.txt` via `std.proc.captureShell`, and the lease references that sidecar as `diffHash`. |
 | Append-only canonical ledger | **verified** | All 5 ledger-emit call sites use `std.fs.appendBytes`. Tests prove 0→1→2→5 rows across separate process invocations. |
 | Protected-path bypass detection | **verified** | afterFileEdit on `AGENTS.md`, `CLAUDE.md`, `.cursor/hooks.json`, `.github/workflows/`, `.agentguard/policy.json`, `.agentguard/checks.json` writes bypass-findings. |
 | Pack: state-aware context | **verified** | Adapts `next_instruction` and `prompt` to current state (lease, bypass, unverified-edits, check-state, session). |
@@ -109,10 +109,12 @@ Last updated against the third session of the build (post-audit pass).
 
 These items will not progress without Zero v0.1.4+ ABI improvements:
 
-- **`std.proc.capture`** — bounded subprocess stdout capture. Needed for:
-  - real `git diff` + content-hashed `diffHash` in the lease
-  - `verify` running gated checks itself
-  - `--ci` mode
+- ~~**`std.proc.capture`** — bounded subprocess stdout capture.~~
+  **Landed this session as `std.proc.captureShell(cmdline, buf)`.**
+  Routes through a libc `popen()`-based runtime shim on Mach-O direct
+  backend; ELF64 path emits CGEN004 (unsupported on ELF — not currently
+  needed since CI is also un-bootstrapped). Used by `done --finalize`
+  to capture the real working-tree diff into `lease-diff.txt`.
 - **`std.time`** — wall-clock + monotonic. Needed for:
   - real `issuedAt` / `expiresAt` in the lease (currently `"unset"`)
   - lease TTL enforcement (currently presence-only)
@@ -134,7 +136,8 @@ compiler that adds these opcodes to the darwin-arm64 Mach-O direct backend:
 - `IR_VALUE_FS_EXISTS` (and FS_IS_DIR / FS_MAKE_DIR / FS_REMOVE / FS_REMOVE_DIR)
 - `IR_VALUE_FS_WRITE_PATH` / `IR_VALUE_FS_WRITE_BYTES_PATH`
 - `IR_VALUE_FS_READ_PATH`
-- `IR_VALUE_FS_APPEND_BYTES_PATH` *(this session)*
+- `IR_VALUE_FS_APPEND_BYTES_PATH`
+- `IR_VALUE_PROC_CAPTURE_SHELL` *(this session)*
 
 The opcodes route to a small C runtime shim at `runtime/zero_runtime.c`
 (already in the tree). Cumulative diff is ~200 LOC across
@@ -180,14 +183,19 @@ Total: 15 suites, ~210 assertions, 0 failed in ~55s.
    but the binary doesn't dispatch their envelope shapes. Documented
    `scaffolded`. Don't enable in those hosts until the multi-host envelope
    dispatch lands.
-2. **Real `verify` diff** still pipe-pattern (host-tracked via
-   afterFileEdit hook), not git-aware. If files are edited outside the
-   agent's hooks (manual edit in another editor, generated files,
-   `git stash`), AgentGuard doesn't see them.
+2. **Real `verify` diff** is still pipe-pattern (host-tracked via
+   afterFileEdit hook), not git-aware. The `done --finalize` lease
+   issuance now captures `git diff --name-only HEAD; git ls-files
+   --others --exclude-standard` into `lease-diff.txt`, so the **lease
+   evidence** is git-aware, but `verify`'s `changedFilesPresent` flag
+   still derives from the in-session afterFileEdit hook, not from git.
 3. **Lease `issuedAt` and `expiresAt`** are sentinel strings until
    `std.time` lands. Lease expiry is presence-only.
-4. **Lease `diffHash`** is the literal `"none-since-reset"`. Real content
-   hashing waits on `std.fs.readBytes` + a hash primitive.
+4. **Lease `diffHash`** is now `"lease-diff.txt"` — a path to a sidecar
+   file that contains the real list of changed + untracked paths
+   captured via `std.proc.captureShell` at lease issuance. Content
+   hashing (e.g. sha256) waits on a hash primitive but the sidecar is
+   already auditable.
 5. **`pack` recent_ledger** is a pointer, not the actual recent rows.
    Real ledger readback waits on `std.fs.readBytes`.
 6. **`scan` `package.json` script parsing** is conventional-not-parsed.

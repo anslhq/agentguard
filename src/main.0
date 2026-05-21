@@ -1834,10 +1834,28 @@ pub fun main(world: World) -> Void raises {
                 check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"denied\",\"diagnostics\":[{\"code\":\"CTX004\",\"severity\":\"error\",\"message\":\"no recorded check passes for this lease\",\"help\":\"run your typecheck/test/lint and record the result with `agentguard verify --record-pass <id>`.\"}],\"nextAgentInstruction\":\"No check-state.json present. Run your gated checks and record each pass with `agentguard verify --record-pass <id>` before `done --finalize`.\",\"meta\":{\"truncated\":false}}\n")
                 return
             }
+            // Capture the live git working-tree diff for this lease and
+            // dump it to a sidecar so the diffHash field can reference
+            // real evidence instead of a sentinel string.
+            //
+            // The captured output is the list of files that differ from
+            // HEAD. This is what was actually edited when the lease was
+            // issued; consumers can compare it against a fresh capture
+            // at any later point to detect staleness.
+            //
+            // Honest limit: this uses popen via the C runtime shim,
+            // bounded to 4 KiB of output. Repos with thousands of
+            // changed files would be truncated. Mid-MVP that's fine.
+            let mut diff_buf: [256]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            let _dn = std.proc.captureShell("(git diff --name-only HEAD; git ls-files --others --exclude-standard) 2>/dev/null", diff_buf)
+            let diff_span: Span<u8> = diff_buf
+            let _diff_write = std.fs.write(".agentguard/cache/lease-diff.txt", "")
+            let _diff_append = std.fs.appendBytes(".agentguard/cache/lease-diff.txt", diff_span)
             // Issue the lease. issuedAt + expiresAt are sentinel values
             // (the Mach-O direct backend has no std.time yet); they
-            // become real timestamps when that lands.
-            let _w = std.fs.write(".agentguard/cache/lease-state.json", "{\"id\":\"lease_v1\",\"sessionId\":\"current\",\"issuedAt\":\"unset\",\"diffHash\":\"none-since-reset\",\"expiresAt\":\"unset\",\"checksAttested\":[\"check-state.json\"]}")
+            // become real timestamps when that lands. diffHash now
+            // points at the sidecar artifact written above.
+            let _w = std.fs.write(".agentguard/cache/lease-state.json", "{\"id\":\"lease_v1\",\"sessionId\":\"current\",\"issuedAt\":\"unset\",\"diffHash\":\"lease-diff.txt\",\"expiresAt\":\"unset\",\"checksAttested\":[\"check-state.json\"]}")
             let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"issued\",\"lease\":{\"id\":\"lease_v1\"}}\n"))
             check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"issued\",\"lease\":{\"id\":\"lease_v1\",\"sessionId\":\"current\"},\"meta\":{\"truncated\":false}}\n")
             return

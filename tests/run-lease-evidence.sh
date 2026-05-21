@@ -41,11 +41,22 @@ result=$("$BIN" done --finalize)
 decision=$(jq -r '.leaseDecision' <<<"$result")
 check "with check-state → leaseDecision=issued" "$decision" "issued"
 
-# Verify lease file shape.
+# Verify lease file shape. diffHash now references a real sidecar
+# (lease-diff.txt) captured at lease issuance via std.proc.captureShell.
 hash=$(jq -r '.diffHash' .agentguard/cache/lease-state.json)
-check "lease has diffHash=none-since-reset" "$hash" "none-since-reset"
+check "lease diffHash references sidecar" "$hash" "lease-diff.txt"
 attest=$(jq -r '.checksAttested | join(",")' .agentguard/cache/lease-state.json)
 check "lease has checksAttested" "$attest" "check-state.json"
+
+# The sidecar must exist and contain real captured output from
+# `git diff --name-only HEAD; git ls-files --others --exclude-standard`.
+if [[ -f .agentguard/cache/lease-diff.txt ]]; then
+  echo "  ok: lease-diff.txt sidecar written"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: lease-diff.txt sidecar should exist" >&2
+  FAIL=$((FAIL + 1))
+fi
 
 # 3. After afterFileEdit, finalize is DENIED.
 echo '{"file_path":"/proj/foo.ts"}' | "$BIN" hook --host cursor --event afterFileEdit >/dev/null
@@ -97,6 +108,36 @@ if [[ "$n" -ge 2 ]]; then
   PASS=$((PASS + 1))
 else
   echo "FAIL: ledger should have multiple rows (got $n)" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# Verify that the lease-diff.txt content actually changes when files
+# change. Capture content, modify a file, re-issue lease, verify the
+# sidecar now reflects the new state.
+"$BIN" verify --reset >/dev/null
+rm -f .agentguard/cache/bypass-findings.json
+old_diff=$(cat .agentguard/cache/lease-diff.txt 2>/dev/null || echo "")
+echo "new-untracked-content" > brand_new_file.txt
+"$BIN" verify --record-pass typecheck >/dev/null
+"$BIN" verify --reset >/dev/null
+"$BIN" done --finalize >/dev/null
+new_diff=$(cat .agentguard/cache/lease-diff.txt 2>/dev/null || echo "")
+if [[ "$old_diff" != "$new_diff" ]]; then
+  echo "  ok: lease-diff.txt content changes when files change"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: lease-diff.txt did not change after editing files" >&2
+  echo "  old: $old_diff" >&2
+  echo "  new: $new_diff" >&2
+  FAIL=$((FAIL + 1))
+fi
+# And the new diff should mention the new file.
+if [[ "$new_diff" == *"brand_new_file.txt"* ]]; then
+  echo "  ok: lease-diff.txt contains the newly-created file"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: lease-diff.txt should list brand_new_file.txt" >&2
+  echo "  got: $new_diff" >&2
   FAIL=$((FAIL + 1))
 fi
 

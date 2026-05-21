@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -63,6 +64,40 @@ int zero_fs_append_path(const char *path, unsigned path_len, const char *data, u
     ssize_t written = write(fd, data, data_len);
     close(fd);
     return written >= 0 ? (unsigned)written : 0;
+}
+
+/* std.proc.captureShell(cmdline, buf): run `/bin/sh -c <cmdline>`, capture
+ * up to buf_len bytes of stdout into buf, return bytes-written.
+ *
+ * AgentGuard uses this for `done --finalize` to compute a real diff hash
+ * via `git diff --name-only HEAD | shasum -a 256` and similar shell
+ * pipelines. Exit code is intentionally NOT returned — for our use
+ * cases stdout content alone is sufficient.
+ *
+ * Honest limitations:
+ *   - popen blocks until the child closes its stdout. AgentGuard cmds
+ *     are short (git diff, shasum) so this is fine.
+ *   - No timeout. A hung child hangs AgentGuard. Future: wrap in
+ *     `timeout 5s <cmd>` at the call site.
+ *   - stderr is dropped. AgentGuard's call sites need to design around
+ *     this (currently we redirect stderr to /dev/null at the call site).
+ */
+int zero_proc_capture_shell(const char *cmd, unsigned cmd_len, char *buf, unsigned buf_len) {
+    char cmdbuf[8192];
+    if (cmd_len >= sizeof(cmdbuf)) return 0;
+    memcpy(cmdbuf, cmd, cmd_len);
+    cmdbuf[cmd_len] = '\0';
+    FILE *pipe = popen(cmdbuf, "r");
+    if (!pipe) return 0;
+    unsigned total = 0;
+    while (total < buf_len) {
+        size_t want = buf_len - total;
+        size_t got = fread(buf + total, 1, want, pipe);
+        if (got == 0) break;
+        total += (unsigned)got;
+    }
+    pclose(pipe);
+    return (int)total;
 }
 
 int zero_fs_read_path(const char *path, unsigned path_len, char *buf_ptr, unsigned buf_len) {
