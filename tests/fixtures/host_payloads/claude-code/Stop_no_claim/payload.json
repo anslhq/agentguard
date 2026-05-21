@@ -1,0 +1,6 @@
+{
+  "session_id": "synthetic-session-1",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Let me try a different approach to the validation logic."
+}

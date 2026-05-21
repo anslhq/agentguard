@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "zero": {
+      "source": "vercel-labs/zero",
+      "sourceType": "github",
+      "skillPath": "skills/zero/SKILL.md",
+      "computedHash": "7a783ff26f9c6c2ddb3887ea8c533df3453773f812bed8cf345e2fd75e05f147"
+    }
+  }
+}

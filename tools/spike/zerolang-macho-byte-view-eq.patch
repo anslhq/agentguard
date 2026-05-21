@@ -1,0 +1,70 @@
+diff --git a/native/zero-c/src/emit_macho64.c b/native/zero-c/src/emit_macho64.c
+index 6d2535f..7f18804 100644
+--- a/native/zero-c/src/emit_macho64.c
++++ b/native/zero-c/src/emit_macho64.c
+@@ -1285,6 +1285,65 @@ static bool macho_emit_value_to_reg_at(ZBuf *text, const IrFunction *fun, const
+       return true;
+     case IR_VALUE_BYTE_VIEW_LEN:
+       return macho_emit_byte_view_len_at(text, fun, value->left, reg, frame_size, scratch_slot, ctx, diag);
++    case IR_VALUE_BYTE_VIEW_EQ: {
++      // std.mem.eql / std.mem.eqlBytes / std.crypto.constantTimeEql lowering.
++      // Mirrors the ELF64 algorithm at emit_elf64.c:1792 in AArch64. Returns 1
++      // in `reg` when the two byte views have equal length and identical
++      // contents, 0 otherwise.
++      //
++      // Register usage (AArch64):
++      //   x8  -> remaining-byte counter (32-bit value in w8 view)
++      //   x10 -> left pointer (full 64-bit so address arithmetic is correct)
++      //   x11 -> right pointer
++      //   w12, w13 -> per-byte compare scratch
++      if (!value->left || !value->right) return macho_diag_at(diag, "direct AArch64 Mach-O byte-view equality requires two byte views", value->line, value->column, "missing byte view");
++      // 1. Compute the two lengths. Compare; on length mismatch return 0.
++      if (!macho_emit_byte_view_len_at(text, fun, value->left, 8, frame_size, scratch_slot, ctx, diag)) return false;
++      if (!macho_emit_store_scratch(text, 8, IR_TYPE_U32, scratch_slot, value->left, diag)) return false;
++      if (!macho_emit_byte_view_len_at(text, fun, value->right, 9, frame_size, scratch_slot + 1, ctx, diag)) return false;
++      if (!macho_emit_load_scratch(text, 8, IR_TYPE_U32, scratch_slot, value->left, diag)) return false;
++      macho_emit_cmp_w(text, 8, 9);
++      size_t same_len = macho_emit_b_cond_placeholder(text, 0); // b.eq
++      macho_emit_movz_w(text, reg, 0);
++      size_t end_patch_neq = macho_emit_b_placeholder(text);
++      // 2. Same length. If length == 0, both views are empty → equal.
++      macho_patch_cond19(text, same_len, text->len);
++      size_t zero_len = macho_emit_cbz_w_placeholder(text, 8);
++      // 3. Materialize both pointers into x10 and x11. ptr_at may clobber the
++      //    counter and the other ptr while computing; spill across calls.
++      if (!macho_emit_store_scratch(text, 8, IR_TYPE_U32, scratch_slot, value->left, diag)) return false;
++      if (!macho_emit_byte_view_ptr_at(text, fun, value->left, 10, frame_size, scratch_slot + 1, ctx, diag)) return false;
++      if (!macho_emit_store_scratch(text, 10, IR_TYPE_U64, scratch_slot + 1, value->left, diag)) return false;
++      if (!macho_emit_byte_view_ptr_at(text, fun, value->right, 11, frame_size, scratch_slot + 2, ctx, diag)) return false;
++      if (!macho_emit_load_scratch(text, 10, IR_TYPE_U64, scratch_slot + 1, value->left, diag)) return false;
++      if (!macho_emit_load_scratch(text, 8, IR_TYPE_U32, scratch_slot, value->left, diag)) return false;
++      // 4. Loop: while w8 > 0, compare bytes at x10 and x11. Use 64-bit `add x`
++      //    to advance the pointers (32-bit `add w` would zero the high 32 bits
++      //    and corrupt the address).
++      size_t loop = text->len;
++      macho_emit_ldrb_w(text, 12, 10);
++      macho_emit_ldrb_w(text, 13, 11);
++      macho_emit_cmp_w(text, 12, 13);
++      size_t mismatch = macho_emit_b_cond_placeholder(text, 1); // b.ne
++      macho_emit_add_x_imm(text, 10, 10, 1);
++      macho_emit_add_x_imm(text, 11, 11, 1);
++      macho_emit_sub_w_imm(text, 8, 8, 1);
++      // cbnz w8, loop : 0x35000000 | imm19<<5 | reg. Branch back if more bytes.
++      size_t loop_back_patch = text->len;
++      append_u32le(text, 0x35000000u | (8u & 31u));
++      macho_patch_cond19(text, loop_back_patch, loop);
++      // 5. Fall-through here means w8 reached zero with no mismatch → equal.
++      macho_patch_cond19(text, zero_len, text->len);
++      macho_emit_movz_w(text, reg, 1);
++      size_t end_patch_eq = macho_emit_b_placeholder(text);
++      // 6. Mismatch path.
++      macho_patch_cond19(text, mismatch, text->len);
++      macho_emit_movz_w(text, reg, 0);
++      // 7. Common exit.
++      macho_patch_branch26(text, end_patch_eq, text->len);
++      macho_patch_branch26(text, end_patch_neq, text->len);
++      return true;
++    }
+     case IR_VALUE_BYTE_VIEW_INDEX_LOAD: {
+       unsigned const_index = 0;
+       unsigned char byte = 0;

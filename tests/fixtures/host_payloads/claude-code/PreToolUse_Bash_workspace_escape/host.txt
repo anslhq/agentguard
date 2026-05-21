@@ -1,0 +1,6 @@
+kind: synthetic
+host: claude-code
+host_version: (synthetic shape from docs; not captured)
+agentguard_version: 0.0.1
+captured_at: 2026-05-21
+description: PreToolUse Bash with `rm -rf ~/Downloads`. CMD003 workspace escape via leading ~. Expected to deny in both modes (actionOverride: block).

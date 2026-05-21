@@ -1,0 +1,9 @@
+{
+  "session_id": "synthetic-session-1",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf ~/Downloads",
+    "working_directory": "/Users/harsha/Developer/agentguard"
+  }
+}

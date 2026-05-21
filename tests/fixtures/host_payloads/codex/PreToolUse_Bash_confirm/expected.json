@@ -1,0 +1,6 @@
+{
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Approval required. Run `agentguard approve <id>` from the terminal, then retry."
+  }
+}

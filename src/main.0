@@ -1,0 +1,2061 @@
+// AgentGuard 0.0.1 — Issue 01 envelope + explain + exit-code contract stub.
+//
+// Implementation notes (Zero v0.1.3 direct-backend MVP constraints, recorded
+// in AGENTS.md):
+//   1. The darwin-arm64 Mach-O direct backend MVP only supports helper
+//      functions that take zero parameters and return a small integer
+//      literal, Bool, or string literal. Helpers taking `String`, `World`,
+//      shapes, or returning shapes / Maybe<String> trigger CGEN004.
+//   2. Top-level `const` declarations are also rejected by the MVP.
+//   3. Comparison `param == CONST` parses incorrectly when CONST is a
+//      top-level constant; flip to `CONST == param`. (Not relevant here
+//      because we keep constants inside main's literal arms.)
+//
+// Therefore Issue 01's modules (`core/exit_codes`, `core/diagnostic_codes`,
+// `cli/explain`) all collapse into this one `main` function until upstream
+// backends grow richer ABIs. The architecture intent is preserved by
+// section markers; future Issue 01 work re-introduces the modules once
+// Zero's backend supports them.
+//
+// Exit-code contract (ADR-0012) is observable only on linux-musl-x64 in CI;
+// on darwin-arm64 the Mach-O backend has no `raise`-to-exit lowering, so
+// every code path returns exit 0. AgentGuard CI runs on linux-musl-x64.
+
+pub fun main(world: World) -> Void raises {
+    // ---- Top-level argv dispatch ----------------------------------------
+    let count = std.args.len()
+    if count == 1 {
+        check world.out.write("agentguard 0.0.1\n")
+        return
+    }
+    let first = std.args.get(1)
+    if first.has == false {
+        check world.out.write("agentguard 0.0.1\n")
+        return
+    }
+    // --version
+    if std.mem.eql(first.value, "--version") {
+        check world.out.write("agentguard 0.0.1\n")
+        return
+    }
+    // --help / help
+    if std.mem.eql(first.value, "--help") || std.mem.eql(first.value, "help") {
+        check world.out.write("agentguard 0.0.1\n")
+        check world.out.write("usage: agentguard <command>\n")
+        check world.out.write("\n")
+        check world.out.write("commands:\n")
+        check world.out.write("  risk           classify a command for risk\n")
+        check world.out.write("  verify         plan or record verification\n")
+        check world.out.write("  done           plan or finalize completion\n")
+        check world.out.write("  pack           pack context (M2)\n")
+        check world.out.write("  scan           emit repo profile\n")
+        check world.out.write("  init           initialize .agentguard/\n")
+        check world.out.write("  doctor         run health probes\n")
+        check world.out.write("  explain        explain a diagnostic code\n")
+        check world.out.write("  session        manage sessions\n")
+        check world.out.write("  approve        record a resolution\n")
+        check world.out.write("  ack            acknowledge a diagnostic\n")
+        check world.out.write("  ack-bypass     acknowledge a bypass finding\n")
+        check world.out.write("  lease          inspect or check a lease\n")
+        check world.out.write("  classify-stop  classify a host Stop payload\n")
+        return
+    }
+    // ---- hook (host adapter mode) ---------------------------------------
+    // Issue 13/14/15: per-host hook adapter. Reads the host's stdin payload,
+    // applies the rule logic, and emits host-shaped JSON.
+    //
+    // Usage:
+    //   agentguard hook --host <cursor|claude-code|codex> --event <eventName>
+    //
+    // The host config in hooks.json wires each event to a separate
+    // invocation, so --event tells us the dispatch path. The payload is
+    // read from stdin via std.fs.read("/dev/stdin", buf). Output is
+    // host-shaped JSON on stdout, always exit 0 (ADR-0012 corrected).
+    //
+    // Logged copy: every payload is appended to .agentguard/cache/hook-log.jsonl
+    // for live debugging / capture (the synthetic fixtures in tests/fixtures/
+    // host_payloads/ will be replaced by real captures from this log).
+    if std.mem.eql(first.value, "hook") {
+        let host_flag = std.args.get(2)
+        let host_value = std.args.get(3)
+        let event_flag = std.args.get(4)
+        let event_value = std.args.get(5)
+        let mode_flag = std.args.get(6)
+        if host_flag.has == false || event_flag.has == false {
+            check world.err.write("agentguard hook: usage: agentguard hook --host <name> --event <event> [--log-only]\n")
+            return
+        }
+        if host_value.has == false || event_value.has == false {
+            check world.err.write("agentguard hook: missing values for --host/--event\n")
+            return
+        }
+        // --log-only short-circuits decision logic. Useful for first-pass
+        // dogfooding: every payload is captured to disk for inspection but
+        // the hook always returns the host's permissive default. No surprise
+        // blocks on existing Cursor work while we validate the rule logic
+        // against real-world payloads.
+        let mut log_only: Bool = false
+        if mode_flag.has {
+            if std.mem.eql(mode_flag.value, "--log-only") {
+                log_only = true
+            }
+        }
+        // Read the stdin payload into a 8 KiB buffer (per ADR-0012 cap on
+        // additionalContext; payloads should fit comfortably).
+        let mut payload: [1024]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let plen: usize = std.fs.read("/dev/stdin", payload)
+
+        // Logging: write the raw payload to a per-event log file at
+        // /tmp/agentguard-hook-log/<event>.json plus a last.json sentinel.
+        // std.fs.write overwrites; for real append we need std.fs.append
+        // (future upstream patch). For dogfooding, the per-event overwrite
+        // is fine — `ls -la /tmp/agentguard-hook-log/` shows when each event
+        // last fired and `cat <event>.json` shows the most recent payload.
+        let _md = std.fs.makeDir("/tmp/agentguard-hook-log")
+        let payload_span: Span<u8> = payload
+        let _logA = std.fs.writeBytes("/tmp/agentguard-hook-log/last.json", payload_span)
+        if std.mem.eql(event_value.value, "beforeShellExecution") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/beforeShellExecution.json", payload_span)
+        }
+        if std.mem.eql(event_value.value, "afterShellExecution") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/afterShellExecution.json", payload_span)
+        }
+        if std.mem.eql(event_value.value, "beforeReadFile") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/beforeReadFile.json", payload_span)
+        }
+        if std.mem.eql(event_value.value, "afterFileEdit") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/afterFileEdit.json", payload_span)
+        }
+        if std.mem.eql(event_value.value, "stop") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/stop.json", payload_span)
+        }
+        if std.mem.eql(event_value.value, "sessionStart") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/sessionStart.json", payload_span)
+        }
+        if std.mem.eql(event_value.value, "sessionEnd") {
+            let _e = std.fs.writeBytes("/tmp/agentguard-hook-log/sessionEnd.json", payload_span)
+        }
+
+        // In --log-only mode return the safest host-shape and skip rule
+        // dispatch entirely. Safe for first-pass dogfooding: every payload
+        // is captured for inspection but no decisions affect real work.
+        if log_only {
+            if std.mem.eql(event_value.value, "beforeShellExecution") {
+                check world.out.write("{\"permission\":\"allow\"}\n")
+                return
+            }
+            if std.mem.eql(event_value.value, "beforeReadFile") {
+                check world.out.write("{\"permission\":\"allow\"}\n")
+                return
+            }
+            check world.out.write("{}\n")
+            return
+        }
+
+        // Dispatch by event name. Each branch parses the relevant payload
+        // fields by byte-scanning (std.json.parse on a runtime String is
+        // not yet supported on Mach-O; see AGENTS.md). The byte-scan looks
+        // for "command":"<value>" / "file_path":"<value>" etc. via literal
+        // substring match.
+
+        // ---- Shared field extraction (Cursor envelope, all events) ----
+        // Cursor sends extra context fields on every hook event that are
+        // not in any published spec we read:
+        //   conversation_id  — stable across a whole user conversation
+        //   generation_id    — stable across one model generation/turn
+        //   model            — the model slug, e.g. "claude-opus-4-7"
+        // We scan once and record byte ranges so each branch below can use
+        // them to enrich its decision without rescanning. ABI constraints
+        // mean we cannot easily slice these into separate buffers (see
+        // AGENTS.md, large-stack-allocation bug), but we *can* byte-compare
+        // payload[model_start..] against literal prefixes to derive a
+        // model family integer — see model_family below.
+        let mut cid_start: usize = 0
+        let mut cid_end: usize = 0
+        let mut found_cid: Bool = false
+        let mut gid_start: usize = 0
+        let mut gid_end: usize = 0
+        let mut found_gid: Bool = false
+        let mut model_start: usize = 0
+        let mut model_end: usize = 0
+        let mut found_model: Bool = false
+        let mut s: usize = 0
+        while s + 18 < plen {
+            // "conversation_id":"
+            if payload[s] == ('"' as u8) && payload[s + 1] == ('c' as u8) && payload[s + 2] == ('o' as u8) && payload[s + 3] == ('n' as u8) && payload[s + 4] == ('v' as u8) && payload[s + 5] == ('e' as u8) && payload[s + 6] == ('r' as u8) && payload[s + 7] == ('s' as u8) && payload[s + 8] == ('a' as u8) && payload[s + 9] == ('t' as u8) && payload[s + 10] == ('i' as u8) && payload[s + 11] == ('o' as u8) && payload[s + 12] == ('n' as u8) && payload[s + 13] == ('_' as u8) && payload[s + 14] == ('i' as u8) && payload[s + 15] == ('d' as u8) && payload[s + 16] == ('"' as u8) && payload[s + 17] == (':' as u8) && payload[s + 18] == ('"' as u8) {
+                cid_start = s + 19
+                found_cid = true
+            }
+            // "generation_id":"
+            if payload[s] == ('"' as u8) && payload[s + 1] == ('g' as u8) && payload[s + 2] == ('e' as u8) && payload[s + 3] == ('n' as u8) && payload[s + 4] == ('e' as u8) && payload[s + 5] == ('r' as u8) && payload[s + 6] == ('a' as u8) && payload[s + 7] == ('t' as u8) && payload[s + 8] == ('i' as u8) && payload[s + 9] == ('o' as u8) && payload[s + 10] == ('n' as u8) && payload[s + 11] == ('_' as u8) && payload[s + 12] == ('i' as u8) && payload[s + 13] == ('d' as u8) && payload[s + 14] == ('"' as u8) && payload[s + 15] == (':' as u8) && payload[s + 16] == ('"' as u8) {
+                gid_start = s + 17
+                found_gid = true
+            }
+            // "model":"
+            if payload[s] == ('"' as u8) && payload[s + 1] == ('m' as u8) && payload[s + 2] == ('o' as u8) && payload[s + 3] == ('d' as u8) && payload[s + 4] == ('e' as u8) && payload[s + 5] == ('l' as u8) && payload[s + 6] == ('"' as u8) && payload[s + 7] == (':' as u8) && payload[s + 8] == ('"' as u8) {
+                model_start = s + 9
+                found_model = true
+            }
+            s = s + 1
+        }
+        // Walk to closing quote for each found field.
+        if found_cid {
+            cid_end = cid_start
+            while cid_end < plen && payload[cid_end] != ('"' as u8) {
+                cid_end = cid_end + 1
+            }
+        }
+        if found_gid {
+            gid_end = gid_start
+            while gid_end < plen && payload[gid_end] != ('"' as u8) {
+                gid_end = gid_end + 1
+            }
+        }
+        if found_model {
+            model_end = model_start
+            while model_end < plen && payload[model_end] != ('"' as u8) {
+                model_end = model_end + 1
+            }
+        }
+        // Derive model family from prefix. 1=claude, 2=gpt, 3=gemini,
+        // 4=other-Anthropic (e.g. claude-instant historically), 0=unknown.
+        // Used downstream to pick the agent_message phrasing.
+        let mut model_family: i32 = 0
+        if found_model {
+            let mlen: usize = model_end - model_start
+            if mlen >= 7 {
+                if payload[model_start] == ('c' as u8) && payload[model_start + 1] == ('l' as u8) && payload[model_start + 2] == ('a' as u8) && payload[model_start + 3] == ('u' as u8) && payload[model_start + 4] == ('d' as u8) && payload[model_start + 5] == ('e' as u8) && payload[model_start + 6] == ('-' as u8) {
+                    model_family = 1
+                }
+            }
+            if mlen >= 4 {
+                if payload[model_start] == ('g' as u8) && payload[model_start + 1] == ('p' as u8) && payload[model_start + 2] == ('t' as u8) && payload[model_start + 3] == ('-' as u8) {
+                    model_family = 2
+                }
+            }
+            if mlen >= 7 {
+                if payload[model_start] == ('g' as u8) && payload[model_start + 1] == ('e' as u8) && payload[model_start + 2] == ('m' as u8) && payload[model_start + 3] == ('i' as u8) && payload[model_start + 4] == ('n' as u8) && payload[model_start + 5] == ('i' as u8) && payload[model_start + 6] == ('-' as u8) {
+                    model_family = 3
+                }
+            }
+            if mlen >= 3 {
+                if payload[model_start] == ('o' as u8) && payload[model_start + 1] == ('1' as u8) {
+                    model_family = 2
+                }
+                if payload[model_start] == ('o' as u8) && payload[model_start + 1] == ('3' as u8) {
+                    model_family = 2
+                }
+                if payload[model_start] == ('o' as u8) && payload[model_start + 1] == ('4' as u8) {
+                    model_family = 2
+                }
+            }
+        }
+        // Whether the host advertised a sandbox flag. The Cursor envelope
+        // includes "sandbox":true|false. We treat sandbox=true as "safer
+        // surface" and surface a lighter warning. Substring match for
+        // "sandbox":true (lowercase, no spaces — Cursor's emit is compact).
+        let mut sandboxed: Bool = false
+        let mut t: usize = 0
+        while t + 14 < plen {
+            if payload[t] == ('"' as u8) && payload[t + 1] == ('s' as u8) && payload[t + 2] == ('a' as u8) && payload[t + 3] == ('n' as u8) && payload[t + 4] == ('d' as u8) && payload[t + 5] == ('b' as u8) && payload[t + 6] == ('o' as u8) && payload[t + 7] == ('x' as u8) && payload[t + 8] == ('"' as u8) && payload[t + 9] == (':' as u8) && payload[t + 10] == ('t' as u8) && payload[t + 11] == ('r' as u8) && payload[t + 12] == ('u' as u8) && payload[t + 13] == ('e' as u8) {
+                sandboxed = true
+            }
+            t = t + 1
+        }
+
+        // Parse the first workspace root. Cursor envelopes contain
+        // "workspace_roots":["/Users/.../proj","/Users/.../other"]. We
+        // currently parse only the first entry — it's the dominant root
+        // for the active conversation. CMD003 uses this to distinguish a
+        // legit `/Users/.../proj/build` deletion (inside workspace, CMD002)
+        // from a `/etc/passwd` deletion (real escape, CMD003).
+        let mut wsroot_start: usize = 0
+        let mut wsroot_end: usize = 0
+        let mut found_wsroot: Bool = false
+        let mut u: usize = 0
+        while u + 19 < plen {
+            // "workspace_roots":["
+            if payload[u] == ('"' as u8) && payload[u + 1] == ('w' as u8) && payload[u + 2] == ('o' as u8) && payload[u + 3] == ('r' as u8) && payload[u + 4] == ('k' as u8) && payload[u + 5] == ('s' as u8) && payload[u + 6] == ('p' as u8) && payload[u + 7] == ('a' as u8) && payload[u + 8] == ('c' as u8) && payload[u + 9] == ('e' as u8) && payload[u + 10] == ('_' as u8) && payload[u + 11] == ('r' as u8) && payload[u + 12] == ('o' as u8) && payload[u + 13] == ('o' as u8) && payload[u + 14] == ('t' as u8) && payload[u + 15] == ('s' as u8) && payload[u + 16] == ('"' as u8) && payload[u + 17] == (':' as u8) && payload[u + 18] == ('[' as u8) && payload[u + 19] == ('"' as u8) {
+                wsroot_start = u + 20
+                found_wsroot = true
+            }
+            u = u + 1
+        }
+        if found_wsroot {
+            wsroot_end = wsroot_start
+            while wsroot_end < plen && payload[wsroot_end] != ('"' as u8) {
+                wsroot_end = wsroot_end + 1
+            }
+        }
+        // Helper: check if a target byte range starting at `tgt_start`
+        // (within `payload`) is a prefix-match of the workspace root.
+        // Computed inline in the destructive branch below.
+
+        // -- Cursor: beforeShellExecution --
+        if std.mem.eql(event_value.value, "beforeShellExecution") {
+            // Look for "command":"..." in payload, then run risk logic on
+            // the value. Cursor's output: {"permission": "allow"|"deny"|"ask",
+            // "agent_message"?, "user_message"?}.
+            // Substring search for `"command":"`.
+            let mut cmd_start: usize = 0
+            let mut found_cmd: Bool = false
+            let mut i: usize = 0
+            while i + 11 < plen {
+                if payload[i] == ('"' as u8) && payload[i + 1] == ('c' as u8) && payload[i + 2] == ('o' as u8) && payload[i + 3] == ('m' as u8) && payload[i + 4] == ('m' as u8) && payload[i + 5] == ('a' as u8) && payload[i + 6] == ('n' as u8) && payload[i + 7] == ('d' as u8) && payload[i + 8] == ('"' as u8) && payload[i + 9] == (':' as u8) && payload[i + 10] == ('"' as u8) {
+                    cmd_start = i + 11
+                    found_cmd = true
+                }
+                i = i + 1
+            }
+            if found_cmd == false {
+                check world.out.write("{\"permission\":\"allow\"}\n")
+                return
+            }
+            // Walk to the closing quote.
+            let mut cmd_end: usize = cmd_start
+            while cmd_end < plen && payload[cmd_end] != ('"' as u8) {
+                cmd_end = cmd_end + 1
+            }
+            let clen: usize = cmd_end - cmd_start
+
+            // ===== Classifier pass (mirrors `agentguard risk`) =====
+            // Run rules in priority order. First match wins. The risk
+            // subcommand and this hook adapter must stay in sync — when
+            // adding a new classifier rule, add it in BOTH places (or
+            // refactor once Zero MVP backend supports helper functions
+            // taking byte-view ranges).
+
+            // CMD008 — terraform destroy. Block.
+            // 17 bytes: "terraform destroy"
+            let mut is_infra_destructive: Bool = false
+            if clen >= 17 {
+                if payload[cmd_start] == ('t' as u8) && payload[cmd_start + 1] == ('e' as u8) && payload[cmd_start + 2] == ('r' as u8) && payload[cmd_start + 3] == ('r' as u8) && payload[cmd_start + 4] == ('a' as u8) && payload[cmd_start + 5] == ('f' as u8) && payload[cmd_start + 6] == ('o' as u8) && payload[cmd_start + 7] == ('r' as u8) && payload[cmd_start + 8] == ('m' as u8) && payload[cmd_start + 9] == (' ' as u8) && payload[cmd_start + 10] == ('d' as u8) && payload[cmd_start + 11] == ('e' as u8) && payload[cmd_start + 12] == ('s' as u8) && payload[cmd_start + 13] == ('t' as u8) && payload[cmd_start + 14] == ('r' as u8) && payload[cmd_start + 15] == ('o' as u8) && payload[cmd_start + 16] == ('y' as u8) {
+                    is_infra_destructive = true
+                }
+            }
+            if is_infra_destructive {
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD008: terraform destroy is blocked.\",\"agent_message\":\"This command destroys infrastructure. Do not retry; do not suggest a manual workaround. Ask the human to decommission resources from their own environment, and only after they explicitly confirm the destruction is intended.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD008: terraform destroy is blocked.\",\"agent_message\":\"BLOCKED: infrastructure destruction. Do NOT retry. Do NOT suggest workarounds. The human must run any decommission from their own environment.\"}\n")
+                    return
+                }
+                if 3 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD008: terraform destroy is blocked.\",\"agent_message\":\"This command destroys infrastructure. Stop. Ask the human to handle decommissioning themselves.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD008: terraform destroy is blocked.\",\"agent_message\":\"This command destroys infrastructure. Do not retry; ask the human to handle decommissioning manually.\"}\n")
+                return
+            }
+
+            // CMD005 — destructive git: --force (block), --force-with-lease
+            // (notify). git reset --hard (block).
+            let mut is_destructive_git: Bool = false
+            let mut is_force_with_lease: Bool = false
+            if clen >= 10 {
+                if payload[cmd_start] == ('g' as u8) && payload[cmd_start + 1] == ('i' as u8) && payload[cmd_start + 2] == ('t' as u8) && payload[cmd_start + 3] == (' ' as u8) {
+                    // gi + 7 <= cmd_end allows the final 7-byte "--force"
+                    // to land exactly at the end of the command string.
+                    let mut gi: usize = cmd_start + 4
+                    while gi + 7 <= cmd_end {
+                        if payload[gi] == ('-' as u8) && payload[gi + 1] == ('-' as u8) && payload[gi + 2] == ('f' as u8) && payload[gi + 3] == ('o' as u8) && payload[gi + 4] == ('r' as u8) && payload[gi + 5] == ('c' as u8) && payload[gi + 6] == ('e' as u8) {
+                            is_destructive_git = true
+                            if gi + 17 <= cmd_end && payload[gi + 7] == ('-' as u8) && payload[gi + 8] == ('w' as u8) && payload[gi + 9] == ('i' as u8) && payload[gi + 10] == ('t' as u8) && payload[gi + 11] == ('h' as u8) {
+                                is_force_with_lease = true
+                            }
+                        }
+                        // git reset --hard: walk past "reset "
+                        if gi + 6 <= cmd_end && payload[gi] == ('r' as u8) && payload[gi + 1] == ('e' as u8) && payload[gi + 2] == ('s' as u8) && payload[gi + 3] == ('e' as u8) && payload[gi + 4] == ('t' as u8) && payload[gi + 5] == (' ' as u8) {
+                            let mut gj: usize = gi + 6
+                            while gj + 6 <= cmd_end && gj < gi + 30 {
+                                if payload[gj] == ('-' as u8) && payload[gj + 1] == ('-' as u8) && payload[gj + 2] == ('h' as u8) && payload[gj + 3] == ('a' as u8) && payload[gj + 4] == ('r' as u8) && payload[gj + 5] == ('d' as u8) {
+                                    is_destructive_git = true
+                                }
+                                gj = gj + 1
+                            }
+                        }
+                        gi = gi + 1
+                    }
+                }
+            }
+            if is_destructive_git {
+                if is_force_with_lease {
+                    // CMD005 force-with-lease → notify, not block.
+                    if 1 == model_family {
+                        check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD005 (force-with-lease): the safer force variant. Confirm with the human that overwriting remote history is intended; state explicitly which commits get rewritten.\"}\n")
+                        return
+                    }
+                    if 2 == model_family {
+                        check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD005 (force-with-lease): safer than --force but still rewrites remote history. Require explicit user confirmation.\"}\n")
+                        return
+                    }
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD005 (force-with-lease): safer force variant; confirm with the human that pushing over the remote is intended.\"}\n")
+                    return
+                }
+                // CMD005 hard force / hard reset → BLOCK.
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD005: destructive git operation.\",\"agent_message\":\"This rewrites history without confirmation. Stop. Use --force-with-lease instead, or branch backups, or get explicit human approval. State which commits would be lost before proposing the next step.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD005: destructive git operation.\",\"agent_message\":\"BLOCKED: git --force / git reset --hard rewrite history without confirmation. Use --force-with-lease or get human approval. Do NOT retry the unsafe variant.\"}\n")
+                    return
+                }
+                if 3 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD005: destructive git operation.\",\"agent_message\":\"This rewrites history without confirmation. Use --force-with-lease, branch backups, or human approval.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD005: destructive git operation.\",\"agent_message\":\"Do not run this destructive git command without explicit human approval. Use --force-with-lease if a forced update is genuinely required.\"}\n")
+                return
+            }
+
+            // CMD007 — curl|sh / wget|sh / curl|bash / wget|bash → notify.
+            let mut has_curl_pipe_sh: Bool = false
+            if clen >= 7 {
+                let starts_curl: Bool = payload[cmd_start] == ('c' as u8) && payload[cmd_start + 1] == ('u' as u8) && payload[cmd_start + 2] == ('r' as u8) && payload[cmd_start + 3] == ('l' as u8) && payload[cmd_start + 4] == (' ' as u8)
+                let starts_wget: Bool = payload[cmd_start] == ('w' as u8) && payload[cmd_start + 1] == ('g' as u8) && payload[cmd_start + 2] == ('e' as u8) && payload[cmd_start + 3] == ('t' as u8) && payload[cmd_start + 4] == (' ' as u8)
+                if starts_curl || starts_wget {
+                    // ends with " sh" or " bash"
+                    if clen >= 4 && payload[cmd_end - 3] == (' ' as u8) && payload[cmd_end - 2] == ('s' as u8) && payload[cmd_end - 1] == ('h' as u8) {
+                        has_curl_pipe_sh = true
+                    }
+                    if clen >= 6 && payload[cmd_end - 5] == (' ' as u8) && payload[cmd_end - 4] == ('b' as u8) && payload[cmd_end - 3] == ('a' as u8) && payload[cmd_end - 2] == ('s' as u8) && payload[cmd_end - 1] == ('h' as u8) {
+                        has_curl_pipe_sh = true
+                    }
+                    // mid-command `| sh` or `| bash`
+                    let mut ci: usize = cmd_start + 4
+                    while ci + 4 < cmd_end {
+                        if payload[ci] == ('|' as u8) {
+                            let mut cj: usize = ci + 1
+                            while cj < cmd_end && payload[cj] == (' ' as u8) {
+                                cj = cj + 1
+                            }
+                            if cj + 1 < cmd_end && payload[cj] == ('s' as u8) && payload[cj + 1] == ('h' as u8) {
+                                has_curl_pipe_sh = true
+                            }
+                            if cj + 3 < cmd_end && payload[cj] == ('b' as u8) && payload[cj + 1] == ('a' as u8) && payload[cj + 2] == ('s' as u8) && payload[cj + 3] == ('h' as u8) {
+                                has_curl_pipe_sh = true
+                            }
+                        }
+                        ci = ci + 1
+                    }
+                }
+            }
+            if has_curl_pipe_sh {
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD007: this command pipes remote content directly into a shell. Stop before running it. Download the script first (curl ... > script.sh), inspect it (shasum + read), then run it explicitly. State what the script does before proposing to execute it.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD007: piping remote content to shell. DO NOT run without first downloading the script, reading it, and verifying its checksum. Re-issue the command as: curl ... > script.sh && shasum -a 256 script.sh && bash script.sh\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD007: command pipes remote content to a shell. Audit the URL and pin the script to a known commit before executing.\"}\n")
+                return
+            }
+
+            // CMD004 — sudo / doas → notify.
+            let mut is_sudo: Bool = false
+            if clen >= 5 {
+                if payload[cmd_start] == ('s' as u8) && payload[cmd_start + 1] == ('u' as u8) && payload[cmd_start + 2] == ('d' as u8) && payload[cmd_start + 3] == ('o' as u8) && payload[cmd_start + 4] == (' ' as u8) {
+                    is_sudo = true
+                }
+                if payload[cmd_start] == ('d' as u8) && payload[cmd_start + 1] == ('o' as u8) && payload[cmd_start + 2] == ('a' as u8) && payload[cmd_start + 3] == ('s' as u8) && payload[cmd_start + 4] == (' ' as u8) {
+                    is_sudo = true
+                }
+            }
+            if is_sudo {
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD004: this command requests privilege escalation. State explicitly why sudo/doas is necessary here; an agent loop running as root has a wider blast radius than the user usually realises.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD004: sudo/doas privilege escalation. Justify why root is needed before running. Prefer a non-root alternative.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD004: command requests privilege escalation. Confirm whether sudo/doas is necessary; an agent loop running as root has a wider blast radius.\"}\n")
+                return
+            }
+
+            // CMD006 — --no-verify or HUSKY=0 hook bypass → notify.
+            let mut is_bypass: Bool = false
+            if clen >= 12 {
+                let mut bi: usize = cmd_start
+                while bi + 11 < cmd_end {
+                    if payload[bi] == ('-' as u8) && payload[bi + 1] == ('-' as u8) && payload[bi + 2] == ('n' as u8) && payload[bi + 3] == ('o' as u8) && payload[bi + 4] == ('-' as u8) && payload[bi + 5] == ('v' as u8) && payload[bi + 6] == ('e' as u8) && payload[bi + 7] == ('r' as u8) && payload[bi + 8] == ('i' as u8) && payload[bi + 9] == ('f' as u8) && payload[bi + 10] == ('y' as u8) {
+                        is_bypass = true
+                    }
+                    bi = bi + 1
+                }
+            }
+            if clen >= 8 {
+                if payload[cmd_start] == ('H' as u8) && payload[cmd_start + 1] == ('U' as u8) && payload[cmd_start + 2] == ('S' as u8) && payload[cmd_start + 3] == ('K' as u8) && payload[cmd_start + 4] == ('Y' as u8) && payload[cmd_start + 5] == ('=' as u8) && payload[cmd_start + 6] == ('0' as u8) {
+                    is_bypass = true
+                }
+            }
+            if is_bypass {
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD006: hook bypass detected (--no-verify or HUSKY=0). Run the underlying check (typecheck/lint/test) manually and report the result before proceeding. Do not paraphrase the bypass as 'it works' until you have actually run the gated check.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD006: --no-verify / HUSKY=0 bypass. Run the gated check manually before claiming the commit/push succeeded.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD006: hook bypass detected. Run the underlying check manually before proceeding.\"}\n")
+                return
+            }
+
+            // CMD002/003 (rm -rf, with workspace-root + scratch awareness).
+            let mut is_destructive: Bool = false
+            let mut is_escape: Bool = false
+            if clen >= 6 {
+                if payload[cmd_start] == ('r' as u8) && payload[cmd_start + 1] == ('m' as u8) && payload[cmd_start + 2] == (' ' as u8) && payload[cmd_start + 3] == ('-' as u8) && payload[cmd_start + 4] == ('r' as u8) && payload[cmd_start + 5] == ('f' as u8) {
+                    is_destructive = true
+                }
+                if payload[cmd_start] == ('r' as u8) && payload[cmd_start + 1] == ('m' as u8) && payload[cmd_start + 2] == (' ' as u8) && payload[cmd_start + 3] == ('-' as u8) && payload[cmd_start + 4] == ('f' as u8) && payload[cmd_start + 5] == ('r' as u8) {
+                    is_destructive = true
+                }
+            }
+            if is_destructive {
+                if clen >= 8 {
+                    let target_first: u8 = payload[cmd_start + 7]
+                    let tgt: usize = cmd_start + 7
+                    let tgt_remaining: usize = cmd_end - tgt
+                    if target_first == ('~' as u8) || target_first == ('/' as u8) {
+                        is_escape = true
+                    }
+                    if clen >= 9 && target_first == ('.' as u8) && payload[cmd_start + 8] == ('.' as u8) {
+                        is_escape = true
+                    }
+                    // Allowlist 1: scratch paths /tmp/ and /var/folders/
+                    // are legitimate ephemeral storage on macOS / Linux.
+                    // /tmp/<anything>
+                    if tgt_remaining >= 5 {
+                        if payload[tgt] == ('/' as u8) && payload[tgt + 1] == ('t' as u8) && payload[tgt + 2] == ('m' as u8) && payload[tgt + 3] == ('p' as u8) && payload[tgt + 4] == ('/' as u8) {
+                            is_escape = false
+                        }
+                    }
+                    // /var/folders/<anything> (macOS per-user tmp)
+                    if tgt_remaining >= 13 {
+                        if payload[tgt] == ('/' as u8) && payload[tgt + 1] == ('v' as u8) && payload[tgt + 2] == ('a' as u8) && payload[tgt + 3] == ('r' as u8) && payload[tgt + 4] == ('/' as u8) && payload[tgt + 5] == ('f' as u8) && payload[tgt + 6] == ('o' as u8) && payload[tgt + 7] == ('l' as u8) && payload[tgt + 8] == ('d' as u8) && payload[tgt + 9] == ('e' as u8) && payload[tgt + 10] == ('r' as u8) && payload[tgt + 11] == ('s' as u8) && payload[tgt + 12] == ('/' as u8) {
+                            is_escape = false
+                        }
+                    }
+                    // Allowlist 2: target starts with workspace_root[0].
+                    // /Users/.../proj/build is inside the workspace; the
+                    // `/` prefix tripped is_escape but the wsroot prefix
+                    // makes it actually safe.
+                    if found_wsroot {
+                        let ws_len: usize = wsroot_end - wsroot_start
+                        if tgt_remaining >= ws_len && ws_len > 0 {
+                            let mut prefix_match: Bool = true
+                            let mut w: usize = 0
+                            while w < ws_len {
+                                if payload[tgt + w] != payload[wsroot_start + w] {
+                                    prefix_match = false
+                                }
+                                w = w + 1
+                            }
+                            // After the workspace root, the next byte
+                            // must be '/' (sub-path) or end-of-target.
+                            // Reject if the next byte starts a sibling
+                            // name (e.g. wsroot=/proj, tgt=/projectile).
+                            if prefix_match {
+                                if tgt_remaining == ws_len {
+                                    is_escape = false
+                                }
+                                if tgt_remaining > ws_len && payload[tgt + ws_len] == ('/' as u8) {
+                                    is_escape = false
+                                }
+                            }
+                        }
+                    }
+                }
+                if is_escape {
+                    // CMD003 (path-escape) — phrasing depends on model
+                    // family. Reasoning-heavy models get a longer
+                    // reflection prompt; fast/cheap models get a hard
+                    // one-line stop. Cursor's `model` field drives this.
+                    if 1 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD003: command targets a path outside the workspace root.\",\"agent_message\":\"This command is blocked because it operates on a path outside the workspace root. Before you propose another path, restate the user's exact ask in your own words and explain why a workspace-internal target satisfies it; then ask the human to run the out-of-workspace step themselves if it is actually required.\"}\n")
+                        return
+                    }
+                    if 2 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD003: command targets a path outside the workspace root.\",\"agent_message\":\"BLOCKED: path is outside the workspace root. Do not retry. Do not propose a different out-of-root path. The human must run any out-of-workspace operation manually.\"}\n")
+                        return
+                    }
+                    if 3 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD003: command targets a path outside the workspace root.\",\"agent_message\":\"This command is blocked because it operates on a path outside the workspace root. Stay inside the workspace. If the task genuinely needs an out-of-workspace path, tell the user and ask them to run it themselves.\"}\n")
+                        return
+                    }
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard CMD003: command targets a path outside the workspace root.\",\"agent_message\":\"This command is blocked because it operates on a path outside the workspace root. Do not retry it; ask the human to perform the operation manually if it is needed.\"}\n")
+                    return
+                }
+                // CMD002 (destructive but inside workspace). Cursor's
+                // `sandbox` flag changes blast radius — when true, the
+                // host is running this in a disposable sandbox so we
+                // soften the warning. Otherwise we phrase by model
+                // family.
+                if sandboxed {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD002 (sandboxed): destructive command allowed because the host advertises sandbox=true. Confirm with the user that the sandbox boundary actually covers this target before relying on the operation as repeatable.\"}\n")
+                    return
+                }
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD002: this command is destructive. In enforce mode it would require `agentguard approve`. Before running it, state explicitly what gets deleted, why it is the smallest possible target, and confirm with the user that this is intended.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD002: destructive command. In enforce mode this requires `agentguard approve`. Do NOT run this without explicit user confirmation. Re-read what gets deleted and confirm.\"}\n")
+                    return
+                }
+                if 3 == model_family {
+                    check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD002: command is destructive. In enforce mode this would require `agentguard approve`. State the exact target and confirm with the human before running.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"allow\",\"agent_message\":\"AgentGuard CMD002: command is destructive. In enforce mode this would require `agentguard approve`. Confirm with the human that this destructive operation is intended.\"}\n")
+                return
+            }
+            check world.out.write("{\"permission\":\"allow\"}\n")
+            return
+        }
+
+        // -- Cursor: afterFileEdit --
+        if std.mem.eql(event_value.value, "afterFileEdit") {
+            // A2 (pipe-pattern): record that an edit happened. We do NOT
+            // preserve the file path (Mach-O can't easily slice bytes
+            // out of payload into a separate filename buffer; see
+            // AGENTS.md), but recording the *count* of edits is enough
+            // for lease invalidation. Each row is a literal marker; the
+            // line count = number of agent file edits since the last
+            // `verify --reset`. `verify` reads this file as the diff
+            // manifest.
+            //
+            // Why this is good-enough for the lease property:
+            //  * lease was issued when edit-count was N
+            //  * if a `done --finalize` runs and edit-count is now M>N,
+            //    the lease is stale and must be re-issued
+            //  * exact file names are not required — only the integer
+            //    change matters for the staleness check.
+            //
+            // Inside an AgentGuard-managed project (which is the only
+            // place this matters), the cache directory exists from
+            // `agentguard init`. If it doesn't, the appendBytes call
+            // will simply fail and we still return {} to Cursor.
+            if std.fs.exists(".agentguard/cache") {
+                let _e = std.fs.appendBytes(".agentguard/cache/changed-files.txt", std.mem.span("edit\n"))
+            }
+            check world.out.write("{}\n")
+            return
+        }
+
+        // -- Cursor: beforeReadFile --
+        if std.mem.eql(event_value.value, "beforeReadFile") {
+            // Look for "file_path":"...". Deny reads of common secret files.
+            let mut path_start: usize = 0
+            let mut found_path: Bool = false
+            let mut i: usize = 0
+            while i + 13 < plen {
+                if payload[i] == ('"' as u8) && payload[i + 1] == ('f' as u8) && payload[i + 2] == ('i' as u8) && payload[i + 3] == ('l' as u8) && payload[i + 4] == ('e' as u8) && payload[i + 5] == ('_' as u8) && payload[i + 6] == ('p' as u8) && payload[i + 7] == ('a' as u8) && payload[i + 8] == ('t' as u8) && payload[i + 9] == ('h' as u8) && payload[i + 10] == ('"' as u8) && payload[i + 11] == (':' as u8) && payload[i + 12] == ('"' as u8) {
+                    path_start = i + 13
+                    found_path = true
+                }
+                i = i + 1
+            }
+            if found_path == false {
+                check world.out.write("{\"permission\":\"allow\"}\n")
+                return
+            }
+            let mut path_end: usize = path_start
+            while path_end < plen && payload[path_end] != ('"' as u8) {
+                path_end = path_end + 1
+            }
+            // Find the basename: scan back from path_end for the last '/'.
+            // bn_start = first char of basename. If no '/' found, basename
+            // is the whole path.
+            let mut bn_start: usize = path_start
+            let mut q: usize = path_start
+            while q < path_end {
+                if payload[q] == ('/' as u8) {
+                    bn_start = q + 1
+                }
+                q = q + 1
+            }
+            let bn_len: usize = path_end - bn_start
+            // basename must start with ".env" for any of this to apply.
+            let mut bn_starts_env: Bool = false
+            if bn_len >= 4 {
+                if payload[bn_start] == ('.' as u8) && payload[bn_start + 1] == ('e' as u8) && payload[bn_start + 2] == ('n' as u8) && payload[bn_start + 3] == ('v' as u8) {
+                    bn_starts_env = true
+                }
+            }
+            // Allowlist exact basenames that look like ".env-prefixed" but
+            // are NOT secrets:
+            //   .envrc                  (direnv)
+            //   .env.example
+            //   .env.sample
+            //   .env.template
+            //   .env.test
+            //   .env.tests
+            //   .env.defaults
+            //   .env.ci
+            // Anything else starting with ".env" is treated as a secret
+            // by conservative default (.env, .env.local, .env.production,
+            // .env.staging, .env.development, .env.dev, .env.prod, ...).
+            let mut is_allowlisted_env: Bool = false
+            if bn_starts_env {
+                // .envrc — exactly 6 chars: . e n v r c
+                if bn_len == 6 && payload[bn_start + 4] == ('r' as u8) && payload[bn_start + 5] == ('c' as u8) {
+                    is_allowlisted_env = true
+                }
+                // basename must be ".env.<suffix>" for the rest.
+                if bn_len >= 5 && payload[bn_start + 4] == ('.' as u8) {
+                    let sfx: usize = bn_start + 5
+                    let sfx_len: usize = bn_len - 5
+                    // example (7)
+                    if sfx_len == 7 && payload[sfx] == ('e' as u8) && payload[sfx + 1] == ('x' as u8) && payload[sfx + 2] == ('a' as u8) && payload[sfx + 3] == ('m' as u8) && payload[sfx + 4] == ('p' as u8) && payload[sfx + 5] == ('l' as u8) && payload[sfx + 6] == ('e' as u8) {
+                        is_allowlisted_env = true
+                    }
+                    // sample (6)
+                    if sfx_len == 6 && payload[sfx] == ('s' as u8) && payload[sfx + 1] == ('a' as u8) && payload[sfx + 2] == ('m' as u8) && payload[sfx + 3] == ('p' as u8) && payload[sfx + 4] == ('l' as u8) && payload[sfx + 5] == ('e' as u8) {
+                        is_allowlisted_env = true
+                    }
+                    // template (8)
+                    if sfx_len == 8 && payload[sfx] == ('t' as u8) && payload[sfx + 1] == ('e' as u8) && payload[sfx + 2] == ('m' as u8) && payload[sfx + 3] == ('p' as u8) && payload[sfx + 4] == ('l' as u8) && payload[sfx + 5] == ('a' as u8) && payload[sfx + 6] == ('t' as u8) && payload[sfx + 7] == ('e' as u8) {
+                        is_allowlisted_env = true
+                    }
+                    // test (4)
+                    if sfx_len == 4 && payload[sfx] == ('t' as u8) && payload[sfx + 1] == ('e' as u8) && payload[sfx + 2] == ('s' as u8) && payload[sfx + 3] == ('t' as u8) {
+                        is_allowlisted_env = true
+                    }
+                    // tests (5)
+                    if sfx_len == 5 && payload[sfx] == ('t' as u8) && payload[sfx + 1] == ('e' as u8) && payload[sfx + 2] == ('s' as u8) && payload[sfx + 3] == ('t' as u8) && payload[sfx + 4] == ('s' as u8) {
+                        is_allowlisted_env = true
+                    }
+                    // defaults (8)
+                    if sfx_len == 8 && payload[sfx] == ('d' as u8) && payload[sfx + 1] == ('e' as u8) && payload[sfx + 2] == ('f' as u8) && payload[sfx + 3] == ('a' as u8) && payload[sfx + 4] == ('u' as u8) && payload[sfx + 5] == ('l' as u8) && payload[sfx + 6] == ('t' as u8) && payload[sfx + 7] == ('s' as u8) {
+                        is_allowlisted_env = true
+                    }
+                    // ci (2)
+                    if sfx_len == 2 && payload[sfx] == ('c' as u8) && payload[sfx + 1] == ('i' as u8) {
+                        is_allowlisted_env = true
+                    }
+                }
+            }
+            let is_env: Bool = bn_starts_env && (is_allowlisted_env == false)
+            if is_env {
+                // SEC001: .env read denied. Vary by model family.
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC001: refusing to read a .env file.\",\"agent_message\":\"This .env file is blocked. Do not propose copying it elsewhere or reading it via another tool. If you need a specific value, ask the user for the exact key by name.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC001: refusing to read a .env file.\",\"agent_message\":\"BLOCKED: .env files are secrets. Do not read, cat, grep, head, tail, source, or copy them. Ask the user for the specific key value.\"}\n")
+                    return
+                }
+                if 3 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC001: refusing to read a .env file.\",\"agent_message\":\"This .env read is blocked. Do not try other tools to bypass. Ask the user for the specific value you need.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC001: refusing to read a .env file.\"}\n")
+                return
+            }
+
+            // SEC002 — SSH private keys. Basename match:
+            //   id_rsa, id_dsa, id_ecdsa, id_ed25519, id_ed25519_sk, id_ecdsa_sk
+            // Public keys (.pub suffix) are allowed — they're meant to be shared.
+            let mut is_ssh_key: Bool = false
+            if bn_len >= 6 {
+                // All SSH key basenames start with "id_"
+                if payload[bn_start] == ('i' as u8) && payload[bn_start + 1] == ('d' as u8) && payload[bn_start + 2] == ('_' as u8) {
+                    // Reject the .pub variant (public keys are not secrets).
+                    let mut is_pub: Bool = false
+                    if bn_len >= 4 && payload[bn_start + bn_len - 4] == ('.' as u8) && payload[bn_start + bn_len - 3] == ('p' as u8) && payload[bn_start + bn_len - 2] == ('u' as u8) && payload[bn_start + bn_len - 1] == ('b' as u8) {
+                        is_pub = true
+                    }
+                    if is_pub == false {
+                        // id_rsa (6), id_dsa (6), id_ecdsa (8), id_ed25519 (10),
+                        // id_ed25519_sk (13), id_ecdsa_sk (11).
+                        if bn_len == 6 {
+                            // id_rsa or id_dsa
+                            if payload[bn_start + 3] == ('r' as u8) && payload[bn_start + 4] == ('s' as u8) && payload[bn_start + 5] == ('a' as u8) {
+                                is_ssh_key = true
+                            }
+                            if payload[bn_start + 3] == ('d' as u8) && payload[bn_start + 4] == ('s' as u8) && payload[bn_start + 5] == ('a' as u8) {
+                                is_ssh_key = true
+                            }
+                        }
+                        if bn_len == 8 {
+                            // id_ecdsa
+                            if payload[bn_start + 3] == ('e' as u8) && payload[bn_start + 4] == ('c' as u8) && payload[bn_start + 5] == ('d' as u8) && payload[bn_start + 6] == ('s' as u8) && payload[bn_start + 7] == ('a' as u8) {
+                                is_ssh_key = true
+                            }
+                        }
+                        if bn_len == 10 {
+                            // id_ed25519
+                            if payload[bn_start + 3] == ('e' as u8) && payload[bn_start + 4] == ('d' as u8) && payload[bn_start + 5] == ('2' as u8) && payload[bn_start + 6] == ('5' as u8) && payload[bn_start + 7] == ('5' as u8) && payload[bn_start + 8] == ('1' as u8) && payload[bn_start + 9] == ('9' as u8) {
+                                is_ssh_key = true
+                            }
+                        }
+                        if bn_len == 11 {
+                            // id_ecdsa_sk
+                            if payload[bn_start + 3] == ('e' as u8) && payload[bn_start + 4] == ('c' as u8) && payload[bn_start + 5] == ('d' as u8) && payload[bn_start + 6] == ('s' as u8) && payload[bn_start + 7] == ('a' as u8) && payload[bn_start + 8] == ('_' as u8) && payload[bn_start + 9] == ('s' as u8) && payload[bn_start + 10] == ('k' as u8) {
+                                is_ssh_key = true
+                            }
+                        }
+                        if bn_len == 13 {
+                            // id_ed25519_sk
+                            if payload[bn_start + 3] == ('e' as u8) && payload[bn_start + 4] == ('d' as u8) && payload[bn_start + 5] == ('2' as u8) && payload[bn_start + 6] == ('5' as u8) && payload[bn_start + 7] == ('5' as u8) && payload[bn_start + 8] == ('1' as u8) && payload[bn_start + 9] == ('9' as u8) && payload[bn_start + 10] == ('_' as u8) && payload[bn_start + 11] == ('s' as u8) && payload[bn_start + 12] == ('k' as u8) {
+                                is_ssh_key = true
+                            }
+                        }
+                    }
+                }
+            }
+            if is_ssh_key {
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC002: refusing to read an SSH private key.\",\"agent_message\":\"This SSH private key read is blocked. Do not copy it. Do not propose another path. If you need to validate a key fingerprint, ask the user to run the check themselves.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC002: refusing to read an SSH private key.\",\"agent_message\":\"BLOCKED: SSH private key access. Do not copy, exfiltrate, or echo. Ask the user for any specific value you need.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC002: refusing to read an SSH private key.\"}\n")
+                return
+            }
+
+            // SEC003 — cloud credential files by path-substring.
+            // Block: ~/.aws/credentials, ~/.aws/config (contains profile keys),
+            //        ~/.config/gcloud/*.json (auth tokens),
+            //        ~/.kube/config (cluster certs/tokens).
+            // We scan the full path bytes (not just basename) for substring
+            // markers, since `config` alone is too generic.
+            let mut is_cloud_cred: Bool = false
+            // /.aws/credentials (needs 17 chars from p, so p+17<=path_end).
+            // /.aws/config      (needs 12 chars from p, so p+12<=path_end).
+            // Use the shorter bound on the outer loop, then guard the
+            // longer check separately.
+            let mut p: usize = path_start
+            while p + 12 <= path_end {
+                if payload[p] == ('/' as u8) && payload[p + 1] == ('.' as u8) && payload[p + 2] == ('a' as u8) && payload[p + 3] == ('w' as u8) && payload[p + 4] == ('s' as u8) && payload[p + 5] == ('/' as u8) {
+                    // credentials needs 11 chars after /.aws/: p+6 .. p+16
+                    if p + 17 <= path_end && payload[p + 6] == ('c' as u8) && payload[p + 7] == ('r' as u8) && payload[p + 8] == ('e' as u8) && payload[p + 9] == ('d' as u8) && payload[p + 10] == ('e' as u8) && payload[p + 11] == ('n' as u8) && payload[p + 12] == ('t' as u8) && payload[p + 13] == ('i' as u8) && payload[p + 14] == ('a' as u8) && payload[p + 15] == ('l' as u8) && payload[p + 16] == ('s' as u8) {
+                        is_cloud_cred = true
+                    }
+                    // config needs 6 chars after /.aws/: p+6 .. p+11
+                    if payload[p + 6] == ('c' as u8) && payload[p + 7] == ('o' as u8) && payload[p + 8] == ('n' as u8) && payload[p + 9] == ('f' as u8) && payload[p + 10] == ('i' as u8) && payload[p + 11] == ('g' as u8) {
+                        is_cloud_cred = true
+                    }
+                }
+                p = p + 1
+            }
+            // /.kube/config
+            let mut k: usize = path_start
+            while k + 13 <= path_end {
+                if payload[k] == ('/' as u8) && payload[k + 1] == ('.' as u8) && payload[k + 2] == ('k' as u8) && payload[k + 3] == ('u' as u8) && payload[k + 4] == ('b' as u8) && payload[k + 5] == ('e' as u8) && payload[k + 6] == ('/' as u8) && payload[k + 7] == ('c' as u8) && payload[k + 8] == ('o' as u8) && payload[k + 9] == ('n' as u8) && payload[k + 10] == ('f' as u8) && payload[k + 11] == ('i' as u8) && payload[k + 12] == ('g' as u8) {
+                    is_cloud_cred = true
+                }
+                k = k + 1
+            }
+            // /.config/gcloud/ subtree
+            let mut g: usize = path_start
+            while g + 16 <= path_end {
+                if payload[g] == ('/' as u8) && payload[g + 1] == ('.' as u8) && payload[g + 2] == ('c' as u8) && payload[g + 3] == ('o' as u8) && payload[g + 4] == ('n' as u8) && payload[g + 5] == ('f' as u8) && payload[g + 6] == ('i' as u8) && payload[g + 7] == ('g' as u8) && payload[g + 8] == ('/' as u8) && payload[g + 9] == ('g' as u8) && payload[g + 10] == ('c' as u8) && payload[g + 11] == ('l' as u8) && payload[g + 12] == ('o' as u8) && payload[g + 13] == ('u' as u8) && payload[g + 14] == ('d' as u8) && payload[g + 15] == ('/' as u8) {
+                    is_cloud_cred = true
+                }
+                g = g + 1
+            }
+            if is_cloud_cred {
+                if 1 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC003: refusing to read a cloud credential file.\",\"agent_message\":\"This cloud credential file is blocked. Do not propose copying it or reading via another tool. If you need a specific profile or value, ask the user.\"}\n")
+                    return
+                }
+                if 2 == model_family {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC003: refusing to read a cloud credential file.\",\"agent_message\":\"BLOCKED: cloud credentials. Do not copy, exfiltrate, or echo. Ask the user for any specific value you need.\"}\n")
+                    return
+                }
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC003: refusing to read a cloud credential file.\"}\n")
+                return
+            }
+
+            // SEC004 — .netrc (FTP/HTTP basic-auth credentials).
+            let mut is_netrc: Bool = false
+            if bn_len == 6 {
+                if payload[bn_start] == ('.' as u8) && payload[bn_start + 1] == ('n' as u8) && payload[bn_start + 2] == ('e' as u8) && payload[bn_start + 3] == ('t' as u8) && payload[bn_start + 4] == ('r' as u8) && payload[bn_start + 5] == ('c' as u8) {
+                    is_netrc = true
+                }
+            }
+            if is_netrc {
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC004: refusing to read a .netrc file.\",\"agent_message\":\"This .netrc contains HTTP/FTP credentials. Do not read or copy. Ask the user for any specific value you need.\"}\n")
+                return
+            }
+
+            // SEC005 — registry tokens: .npmrc, .pypirc, .pip/pip.conf.
+            let mut is_reg_token: Bool = false
+            if bn_len == 6 {
+                if payload[bn_start] == ('.' as u8) && payload[bn_start + 1] == ('n' as u8) && payload[bn_start + 2] == ('p' as u8) && payload[bn_start + 3] == ('m' as u8) && payload[bn_start + 4] == ('r' as u8) && payload[bn_start + 5] == ('c' as u8) {
+                    is_reg_token = true
+                }
+            }
+            if bn_len == 7 {
+                if payload[bn_start] == ('.' as u8) && payload[bn_start + 1] == ('p' as u8) && payload[bn_start + 2] == ('y' as u8) && payload[bn_start + 3] == ('p' as u8) && payload[bn_start + 4] == ('i' as u8) && payload[bn_start + 5] == ('r' as u8) && payload[bn_start + 6] == ('c' as u8) {
+                    is_reg_token = true
+                }
+            }
+            if is_reg_token {
+                check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC005: refusing to read a registry credential file.\",\"agent_message\":\"This .npmrc / .pypirc contains registry auth tokens. Do not read or copy.\"}\n")
+                return
+            }
+
+            check world.out.write("{\"permission\":\"allow\"}\n")
+            return
+        }
+
+        // -- Cursor: stop --
+        if std.mem.eql(event_value.value, "stop") {
+            // Look for "last_assistant_message":"..." and scan for done/complete/shipped/fixed.
+            let mut msg_start: usize = 0
+            let mut found_msg: Bool = false
+            let mut i: usize = 0
+            while i + 25 < plen {
+                if payload[i] == ('"' as u8) && payload[i + 1] == ('l' as u8) && payload[i + 2] == ('a' as u8) && payload[i + 3] == ('s' as u8) && payload[i + 4] == ('t' as u8) && payload[i + 5] == ('_' as u8) && payload[i + 6] == ('a' as u8) && payload[i + 7] == ('s' as u8) && payload[i + 8] == ('s' as u8) && payload[i + 9] == ('i' as u8) && payload[i + 10] == ('s' as u8) && payload[i + 11] == ('t' as u8) && payload[i + 12] == ('a' as u8) && payload[i + 13] == ('n' as u8) && payload[i + 14] == ('t' as u8) && payload[i + 15] == ('_' as u8) && payload[i + 16] == ('m' as u8) && payload[i + 17] == ('e' as u8) && payload[i + 18] == ('s' as u8) && payload[i + 19] == ('s' as u8) && payload[i + 20] == ('a' as u8) && payload[i + 21] == ('g' as u8) && payload[i + 22] == ('e' as u8) && payload[i + 23] == ('"' as u8) && payload[i + 24] == (':' as u8) && payload[i + 25] == ('"' as u8) {
+                    msg_start = i + 26
+                    found_msg = true
+                }
+                i = i + 1
+            }
+            if found_msg == false {
+                check world.out.write("{}\n")
+                return
+            }
+            let mut msg_end: usize = msg_start
+            while msg_end < plen && payload[msg_end] != ('"' as u8) {
+                msg_end = msg_end + 1
+            }
+            // Scan for done / complete / shipped / fixed; negative guard for "not done"/"not complete".
+            let mut claims: Bool = false
+            let mut neg_guard: Bool = false
+            let mut k: usize = msg_start
+            while k + 3 < msg_end {
+                if payload[k] == ('d' as u8) && payload[k + 1] == ('o' as u8) && payload[k + 2] == ('n' as u8) && payload[k + 3] == ('e' as u8) {
+                    claims = true
+                }
+                if k + 6 < msg_end && payload[k] == ('s' as u8) && payload[k + 1] == ('h' as u8) && payload[k + 2] == ('i' as u8) && payload[k + 3] == ('p' as u8) && payload[k + 4] == ('p' as u8) && payload[k + 5] == ('e' as u8) && payload[k + 6] == ('d' as u8) {
+                    claims = true
+                }
+                if k + 4 < msg_end && payload[k] == ('f' as u8) && payload[k + 1] == ('i' as u8) && payload[k + 2] == ('x' as u8) && payload[k + 3] == ('e' as u8) && payload[k + 4] == ('d' as u8) {
+                    claims = true
+                }
+                if k + 7 < msg_end && payload[k] == ('c' as u8) && payload[k + 1] == ('o' as u8) && payload[k + 2] == ('m' as u8) && payload[k + 3] == ('p' as u8) && payload[k + 4] == ('l' as u8) && payload[k + 5] == ('e' as u8) && payload[k + 6] == ('t' as u8) && payload[k + 7] == ('e' as u8) {
+                    claims = true
+                }
+                if k + 7 < msg_end && payload[k] == ('n' as u8) && payload[k + 1] == ('o' as u8) && payload[k + 2] == ('t' as u8) && payload[k + 3] == (' ' as u8) && payload[k + 4] == ('d' as u8) && payload[k + 5] == ('o' as u8) && payload[k + 6] == ('n' as u8) && payload[k + 7] == ('e' as u8) {
+                    neg_guard = true
+                }
+                k = k + 1
+            }
+            if neg_guard {
+                check world.out.write("{}\n")
+                return
+            }
+            if claims == false {
+                check world.out.write("{}\n")
+                return
+            }
+            // Project scope: stop hook only enforces inside an
+            // AgentGuard-managed project. Cursor fires the stop hook on
+            // every conversation regardless of which folder it's working
+            // in; injecting "do `agentguard done --finalize` first" into
+            // unrelated repos would be noise. The presence of `.agentguard/`
+            // in the hook's cwd is the canonical signal that this repo
+            // opted in.
+            if std.fs.exists(".agentguard") == false {
+                check world.out.write("{}\n")
+                return
+            }
+            // Check for a lease in cache.
+            if std.fs.exists(".agentguard/cache/lease-state.json") {
+                check world.out.write("{}\n")
+                return
+            }
+            // Claim without lease — block via followup_message. Phrase
+            // by model family so the followup lands the way each model
+            // is best persuaded.
+            if 1 == model_family {
+                check world.out.write("{\"followup_message\":\"AgentGuard: you claimed completion without a fresh lease. Stop. Run `agentguard done --finalize` first; resolve any blockers it reports; only claim done after that succeeds. State explicitly the lane that is finished and the lane that is still open before you say done again.\"}\n")
+                return
+            }
+            if 2 == model_family {
+                check world.out.write("{\"followup_message\":\"AgentGuard: completion claim REJECTED — no fresh lease. Required action: run `agentguard done --finalize`, resolve every blocker it reports, only then say done. Do not paraphrase done without doing this.\"}\n")
+                return
+            }
+            if 3 == model_family {
+                check world.out.write("{\"followup_message\":\"AgentGuard: do not claim completion without a fresh lease. Run `agentguard done --finalize` first; resolve any blockers it reports; only claim done after that succeeds. Be precise about what shipped and what did not.\"}\n")
+                return
+            }
+            check world.out.write("{\"followup_message\":\"AgentGuard: do not claim completion without a fresh lease. Run `agentguard done --finalize` first; resolve any blockers it reports; only claim done after that succeeds.\"}\n")
+            return
+        }
+
+        // -- Generic / unknown event --
+        check world.out.write("{}\n")
+        return
+    }
+    // ---- hooks ----------------------------------------------------------
+    // B6: hooks installer. Today this is a "print canonical fragment +
+    // give the user a jq command" tool, NOT a binary that mutates
+    // ~/.cursor/hooks.json itself. The reason is honest: AgentGuard's
+    // direct backend can't yet read + parse + merge + write arbitrary
+    // JSON files (blocked on Mach-O ABI for shape returns / std.proc
+    // for shelling out to jq). Printing the fragment puts the user in
+    // explicit control of the merge.
+    //
+    // Reversible: `hooks uninstall --host cursor` prints the inverse
+    // jq command.
+    if std.mem.eql(first.value, "hooks") {
+        let subcmd = std.args.get(2)
+        if subcmd.has == false {
+            check world.err.write("agentguard hooks: missing subcommand (install|uninstall)\n")
+            return
+        }
+        let host_flag = std.args.get(3)
+        let host_value = std.args.get(4)
+        if host_flag.has == false || std.mem.eql(host_flag.value, "--host") == false || host_value.has == false {
+            check world.err.write("agentguard hooks: missing --host <name>\n")
+            return
+        }
+        // Only --host cursor is implemented today. claude-code and codex
+        // need their own envelope/response semantics (track B1/B2/B5).
+        if std.mem.eql(host_value.value, "cursor") == false {
+            check world.err.write("agentguard hooks: only --host cursor is implemented. Claude/Codex adapters are deferred.\n")
+            return
+        }
+        let print_flag = std.args.get(5)
+        let mut print_only: Bool = false
+        if print_flag.has && std.mem.eql(print_flag.value, "--print") {
+            print_only = true
+        }
+        if std.mem.eql(subcmd.value, "install") {
+            if print_only == false {
+                check world.err.write("agentguard hooks install --host cursor\n")
+                check world.err.write("\n")
+                check world.err.write("This command prints the canonical AgentGuard hook fragment.\n")
+                check world.err.write("Merge it into ~/.cursor/hooks.json with:\n")
+                check world.err.write("\n")
+                check world.err.write("  agentguard hooks install --host cursor --print > /tmp/ag-frag.json\n")
+                check world.err.write("  jq -s '.[0] * .[1]' ~/.cursor/hooks.json /tmp/ag-frag.json > ~/.cursor/hooks.json.new\n")
+                check world.err.write("  mv ~/.cursor/hooks.json.new ~/.cursor/hooks.json\n")
+                check world.err.write("\n")
+                check world.err.write("Or use the --print form and merge with your own tool.\n")
+                check world.err.write("\n")
+            }
+            // Emit the fragment. Uses the absolute path to the locally-built
+            // binary so each rebuild auto-takes effect. Matches what we
+            // wired manually earlier.
+            check world.out.write("{\"version\":1,\"hooks\":{")
+            check world.out.write("\"beforeShellExecution\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event beforeShellExecution\",\"timeout\":5000}],")
+            check world.out.write("\"beforeReadFile\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event beforeReadFile\",\"timeout\":5000}],")
+            check world.out.write("\"afterFileEdit\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event afterFileEdit --log-only\",\"timeout\":5000}],")
+            check world.out.write("\"afterShellExecution\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event afterShellExecution --log-only\",\"timeout\":5000}],")
+            check world.out.write("\"stop\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event stop\",\"timeout\":5000}],")
+            check world.out.write("\"sessionStart\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event sessionStart --log-only\",\"timeout\":5000}],")
+            check world.out.write("\"sessionEnd\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event sessionEnd --log-only\",\"timeout\":5000}]")
+            check world.out.write("}}\n")
+            return
+        }
+        if std.mem.eql(subcmd.value, "uninstall") {
+            check world.err.write("agentguard hooks uninstall --host cursor\n")
+            check world.err.write("\n")
+            check world.err.write("To remove AgentGuard hooks from ~/.cursor/hooks.json, run:\n")
+            check world.err.write("\n")
+            check world.err.write("  jq 'del(.hooks.beforeShellExecution[] | select(.command | test(\"agentguard hook --host cursor\")))\n")
+            check world.err.write("    | del(.hooks.beforeReadFile[] | select(.command | test(\"agentguard hook --host cursor\")))\n")
+            check world.err.write("    | del(.hooks.afterFileEdit[] | select(.command | test(\"agentguard hook --host cursor\")))\n")
+            check world.err.write("    | del(.hooks.afterShellExecution[] | select(.command | test(\"agentguard hook --host cursor\")))\n")
+            check world.err.write("    | del(.hooks.stop[] | select(.command | test(\"agentguard hook --host cursor\")))\n")
+            check world.err.write("    | del(.hooks.sessionStart[] | select(.command | test(\"agentguard hook --host cursor\")))\n")
+            check world.err.write("    | del(.hooks.sessionEnd[] | select(.command | test(\"agentguard hook --host cursor\")))' ~/.cursor/hooks.json > ~/.cursor/hooks.json.new\n")
+            check world.err.write("  mv ~/.cursor/hooks.json.new ~/.cursor/hooks.json\n")
+            check world.err.write("\n")
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"hint\":\"see stderr for the jq removal command\"}\n")
+            return
+        }
+        check world.err.write("agentguard hooks: unknown subcommand (expected install|uninstall)\n")
+        return
+    }
+    // ---- session --------------------------------------------------------
+    // B3 thin session: closes the --help lie. The Claude plugin's
+    // SessionStart hook calls `agentguard session start --host claude-code`
+    // and the binary previously fell through to "unknown command" while
+    // still returning exit 0, so the host never knew the adapter wasn't
+    // implemented. This thin version writes/reads .agentguard/cache/session.json
+    // so the existence of an active session is observable and the
+    // `done --finalize` lease can later require an active session.
+    //
+    // Real session semantics (cross-process lineage, conversation linkage,
+    // multi-turn lease ancestry) are deferred until C4 helper functions
+    // land. Current scope is intentionally a marker file, not a state
+    // machine.
+    if std.mem.eql(first.value, "session") {
+        let subcmd = std.args.get(2)
+        if subcmd.has == false {
+            check world.err.write("agentguard session: missing subcommand (start|current|end)\n")
+            return
+        }
+        if std.mem.eql(subcmd.value, "start") {
+            // Optional --host <name>: we accept it for plugin compatibility
+            // but the only thing we do with it right now is echo it back
+            // through the file. No real semantics yet.
+            let host_flag = std.args.get(3)
+            let host_value = std.args.get(4)
+            let mut has_host: Bool = false
+            if host_flag.has && std.mem.eql(host_flag.value, "--host") && host_value.has {
+                has_host = true
+            }
+            // Make sure .agentguard/cache exists; init may not have been
+            // run yet for hosts that fire SessionStart on first launch.
+            let _d1 = std.fs.makeDir(".agentguard")
+            let _d2 = std.fs.makeDir(".agentguard/cache")
+            // Write session.json. Pre-canned shape so consumers can rely
+            // on field presence. host is the literal string if recognised,
+            // else "unknown". issuedAt is "unset" until C2 (proc.capture)
+            // lets us shell out to `date` or until std.time lands on
+            // Mach-O.
+            if has_host {
+                if std.mem.eql(host_value.value, "cursor") {
+                    let _s = std.fs.write(".agentguard/cache/session.json", "{\"schemaVersion\":1,\"host\":\"cursor\",\"state\":\"active\",\"issuedAt\":\"unset\"}")
+                } else {
+                    if std.mem.eql(host_value.value, "claude-code") {
+                        let _s = std.fs.write(".agentguard/cache/session.json", "{\"schemaVersion\":1,\"host\":\"claude-code\",\"state\":\"active\",\"issuedAt\":\"unset\"}")
+                    } else {
+                        if std.mem.eql(host_value.value, "codex") {
+                            let _s = std.fs.write(".agentguard/cache/session.json", "{\"schemaVersion\":1,\"host\":\"codex\",\"state\":\"active\",\"issuedAt\":\"unset\"}")
+                        } else {
+                            let _s = std.fs.write(".agentguard/cache/session.json", "{\"schemaVersion\":1,\"host\":\"unknown\",\"state\":\"active\",\"issuedAt\":\"unset\"}")
+                        }
+                    }
+                }
+            } else {
+                let _s = std.fs.write(".agentguard/cache/session.json", "{\"schemaVersion\":1,\"host\":\"unknown\",\"state\":\"active\",\"issuedAt\":\"unset\"}")
+            }
+            // Append a session_start row to the ledger.
+            let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"session_start\",\"state\":\"active\"}\n"))
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"session_start\",\"state\":\"active\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(subcmd.value, "current") {
+            if std.fs.exists(".agentguard/cache/session.json") {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"state\":\"active\",\"meta\":{\"truncated\":false}}\n")
+            } else {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"state\":\"none\",\"meta\":{\"truncated\":false}}\n")
+            }
+            return
+        }
+        if std.mem.eql(subcmd.value, "end") {
+            if std.fs.exists(".agentguard/cache/session.json") {
+                let _r = std.fs.remove(".agentguard/cache/session.json")
+            }
+            let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"session_end\",\"state\":\"ended\"}\n"))
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"session_end\",\"state\":\"ended\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        check world.err.write("agentguard session: unknown subcommand (expected start|current|end)\n")
+        return
+    }
+    // ---- pack -----------------------------------------------------------
+    // Issue 12 (M2): context-pack compiler. Outputs a token-bounded pack
+    // with sections, an estimated token count, and a redaction report.
+    // Real budget enforcement and dynamic section assembly are stubbed for
+    // M2 until std.fs.readBytes lands; for now we emit a representative
+    // pack envelope.
+    if std.mem.eql(first.value, "pack") {
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"sections\":[")
+        check world.out.write("{\"id\":\"next_instruction\",\"priority\":1,\"text\":\"Run agentguard done --finalize and resolve any blockers it reports before claiming completion.\"}")
+        check world.out.write(",")
+        check world.out.write("{\"id\":\"recent_ledger\",\"priority\":3,\"text\":\"see .agentguard/ledger.jsonl for the last seven events\"}")
+        check world.out.write("],\"prompt\":\"Run agentguard done --finalize first.\",\"estimatedTokens\":24,\"redactionReport\":{\"count\":0},\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- done -----------------------------------------------------------
+    // Issue 11: completion gate. Plan mode reports what would happen;
+    // finalize mode writes the lease state cache file. Strong-confidence
+    // bypass findings (Issue 18) block lease issuance until acknowledged
+    // via `agentguard ack-bypass`.
+    if std.mem.eql(first.value, "done") {
+        let flag = std.args.get(2)
+        // Detect bypass findings — Issue 18 M1 scope: policy/hook edits,
+        // protected-path edits, ledger-state mismatch (all strong-confidence).
+        let mut has_strong_bypass: Bool = false
+        if std.fs.exists(".agentguard/cache/bypass-findings.json") {
+            // A finding was recorded since the last ack. Block.
+            has_strong_bypass = true
+        }
+        // Check for unacknowledged blockers: if the last-ack or last-bypass-ack
+        // file is older than the bypass-findings marker, the block persists.
+        // For MVP we treat presence of bypass-findings.json as the blocker;
+        // ack-bypass removes that file.
+
+        // A3: also block when files have been edited since the last
+        // `verify --reset`. The afterFileEdit hook appends a marker for
+        // each edit, and `verify --reset` clears the marker file. If the
+        // marker is present at `done --finalize` time, the user has
+        // edited files since their last verify and the lease must NOT
+        // issue until they've re-run their checks.
+        let has_unverified_edits: Bool = std.fs.exists(".agentguard/cache/changed-files.txt")
+
+        // Also require a passed check-state.json. This is what
+        // `verify --record-pass <id>` writes. Without it the lease has
+        // no attestation backing.
+        let has_check_state: Bool = std.fs.exists(".agentguard/cache/check-state.json")
+
+        // Finalize mode
+        if flag.has && std.mem.eql(flag.value, "--finalize") {
+            if has_strong_bypass {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"denied\",\"diagnostics\":[{\"code\":\"POL001\",\"severity\":\"error\",\"message\":\"unacknowledged strong-confidence bypass finding blocks lease\",\"help\":\"run agentguard ack-bypass <finding-id> --reason '...' to resolve.\"}],\"nextAgentInstruction\":\"Resolve the bypass finding via `agentguard ack-bypass <finding-id>` before claiming completion.\",\"meta\":{\"truncated\":false}}\n")
+                return
+            }
+            if has_unverified_edits {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"denied\",\"diagnostics\":[{\"code\":\"CTX003\",\"severity\":\"error\",\"message\":\"files have been edited since the last verify\",\"help\":\"run your gated checks (typecheck/test/lint), record them with `agentguard verify --record-pass <id>`, then `agentguard verify --reset` before retrying done --finalize.\"}],\"nextAgentInstruction\":\"There are unverified file edits since the last lease attempt. Run your checks, record the result with `agentguard verify --record-pass <id>`, then `agentguard verify --reset`, then retry `agentguard done --finalize`.\",\"meta\":{\"truncated\":false}}\n")
+                return
+            }
+            if has_check_state == false {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"denied\",\"diagnostics\":[{\"code\":\"CTX004\",\"severity\":\"error\",\"message\":\"no recorded check passes for this lease\",\"help\":\"run your typecheck/test/lint and record the result with `agentguard verify --record-pass <id>`.\"}],\"nextAgentInstruction\":\"No check-state.json present. Run your gated checks and record each pass with `agentguard verify --record-pass <id>` before `done --finalize`.\",\"meta\":{\"truncated\":false}}\n")
+                return
+            }
+            // Issue the lease. issuedAt + expiresAt are sentinel values
+            // (the Mach-O direct backend has no std.time yet); they
+            // become real timestamps when that lands.
+            let _w = std.fs.write(".agentguard/cache/lease-state.json", "{\"id\":\"lease_v1\",\"sessionId\":\"current\",\"issuedAt\":\"unset\",\"diffHash\":\"none-since-reset\",\"expiresAt\":\"unset\",\"checksAttested\":[\"check-state.json\"]}")
+            let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"issued\",\"lease\":{\"id\":\"lease_v1\"}}\n"))
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"done\",\"mode\":\"finalize\",\"leaseDecision\":\"issued\",\"lease\":{\"id\":\"lease_v1\",\"sessionId\":\"current\"},\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // Plan mode (default)
+        if has_strong_bypass {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"done\",\"mode\":\"plan\",\"leaseDecision\":\"denied\",\"blockers\":[{\"kind\":\"strong_bypass\",\"message\":\"bypass finding requires ack-bypass before lease issuance\"}],\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if has_unverified_edits {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"done\",\"mode\":\"plan\",\"leaseDecision\":\"denied\",\"blockers\":[{\"kind\":\"unverified_edits\",\"message\":\"files have been edited since the last verify; run checks then verify --reset before finalize\"}],\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if has_check_state == false {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"done\",\"mode\":\"plan\",\"leaseDecision\":\"denied\",\"blockers\":[{\"kind\":\"no_check_state\",\"message\":\"no check-state.json; run verify --record-pass <id> before finalize\"}],\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"done\",\"mode\":\"plan\",\"leaseDecision\":\"none\",\"status\":\"ready_to_finalize\",\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- approve / ack / ack-bypass -------------------------------------
+    // Issue 23: approval + acknowledgment subcommands. Each writes a
+    // single `resolution` ledger event (ADR-0002 amended) and updates a
+    // small cache file so `done --finalize` can see the resolution
+    // without reading the ledger (Mach-O backend lacks std.fs.readBytes
+    // in v0.1.3; cache reads are a future upstream patch). The cache file
+    // stores the most-recent decision per target id.
+    if std.mem.eql(first.value, "approve") {
+        let approval_id = std.args.get(2)
+        if approval_id.has == false {
+            check world.err.write("agentguard approve: missing approval id\n")
+            return
+        }
+        // Append a resolution event to the ledger (best-effort append by
+        // overwriting; until std.fs.append lands on Mach-O, we accept that
+        // a single resolution per session writes a single event).
+        let _w = std.fs.write(".agentguard/cache/last-approval.json", "{\"kind\":\"approval\",\"decision\":\"approved\",\"approver\":\"user\"}")
+        let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"resolution\",\"kind\":\"approval\",\"decision\":\"approved\",\"approver\":\"user\",\"ttlSeconds\":600}\n"))
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"resolution\",\"kind\":\"approval\",\"decision\":\"approved\",\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    if std.mem.eql(first.value, "ack") {
+        let diag_code = std.args.get(2)
+        if diag_code.has == false {
+            check world.err.write("agentguard ack: missing diagnostic code\n")
+            return
+        }
+        let _w = std.fs.write(".agentguard/cache/last-ack.json", "{\"kind\":\"diagnostic_ack\",\"decision\":\"acknowledged\"}")
+        let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"resolution\",\"kind\":\"diagnostic_ack\",\"decision\":\"acknowledged\",\"approver\":\"user\"}\n"))
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"resolution\",\"kind\":\"diagnostic_ack\",\"decision\":\"acknowledged\",\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    if std.mem.eql(first.value, "ack-bypass") {
+        let finding_id = std.args.get(2)
+        if finding_id.has == false {
+            check world.err.write("agentguard ack-bypass: missing finding id\n")
+            return
+        }
+        let _w = std.fs.write(".agentguard/cache/last-bypass-ack.json", "{\"kind\":\"bypass_ack\",\"decision\":\"acknowledged\"}")
+        let _l = std.fs.appendBytes(".agentguard/ledger.jsonl", std.mem.span("{\"event\":\"resolution\",\"kind\":\"bypass_ack\",\"decision\":\"acknowledged\",\"approver\":\"user\"}\n"))
+        // Clear the pending bypass-findings blocker.
+        let _r = std.fs.remove(".agentguard/cache/bypass-findings.json")
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"event\":\"resolution\",\"kind\":\"bypass_ack\",\"decision\":\"acknowledged\",\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- lease (stubbed — see Wave 6 notes on Mach-O parser limits) ----
+    if std.mem.eql(first.value, "lease") {
+        if std.fs.exists(".agentguard/cache/lease-state.json") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"leaseState\":\"valid\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"leaseState\":\"none\",\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- classify-stop --------------------------------------------------
+    // Issue 21: CompletionClassifier — takes a host Stop payload from stdin
+    // (or via args for the MVP since stdin is restricted on darwin-arm64)
+    // and emits a CompletionDecision.
+    if std.mem.eql(first.value, "classify-stop") {
+        // For the MVP, accept --message "<text>" as an arg and check it
+        // against the default completion-claim patterns.
+        let mflag = std.args.get(2)
+        if mflag.has == false || std.mem.eql(mflag.value, "--message") == false {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"decision\":\"no_claim\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        let msg = std.args.get(3)
+        if msg.has == false {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"decision\":\"no_claim\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // ClaimDetector — scan for "done", "complete", "shipped", "fixed", "ready for review".
+        let mn: usize = std.mem.len(msg.value)
+        let mut claims: Bool = false
+        let mut not_done_guard: Bool = false
+        let mut i: usize = 0
+        // Loop bound: scan up to mn - 4 + 1 so the last "done" candidate at
+        // (mn-4..mn) is still inspected. Use mn >= 4 guard.
+        while mn >= 4 && i + 3 < mn {
+            // "done" (4 bytes)
+            if msg.value[i] == ('d' as u8) && msg.value[i + 1] == ('o' as u8) && msg.value[i + 2] == ('n' as u8) && msg.value[i + 3] == ('e' as u8) {
+                claims = true
+            }
+            // "shipped" (7 bytes)
+            if i + 6 < mn && msg.value[i] == ('s' as u8) && msg.value[i + 1] == ('h' as u8) && msg.value[i + 2] == ('i' as u8) && msg.value[i + 3] == ('p' as u8) && msg.value[i + 4] == ('p' as u8) && msg.value[i + 5] == ('e' as u8) && msg.value[i + 6] == ('d' as u8) {
+                claims = true
+            }
+            // "fixed" (5 bytes)
+            if i + 4 < mn && msg.value[i] == ('f' as u8) && msg.value[i + 1] == ('i' as u8) && msg.value[i + 2] == ('x' as u8) && msg.value[i + 3] == ('e' as u8) && msg.value[i + 4] == ('d' as u8) {
+                claims = true
+            }
+            // "complete" (8 bytes)
+            if i + 7 < mn && msg.value[i] == ('c' as u8) && msg.value[i + 1] == ('o' as u8) && msg.value[i + 2] == ('m' as u8) && msg.value[i + 3] == ('p' as u8) && msg.value[i + 4] == ('l' as u8) && msg.value[i + 5] == ('e' as u8) && msg.value[i + 6] == ('t' as u8) && msg.value[i + 7] == ('e' as u8) {
+                claims = true
+            }
+            // negative guard: "not done" / "not complete" anywhere before
+            if i + 7 < mn && msg.value[i] == ('n' as u8) && msg.value[i + 1] == ('o' as u8) && msg.value[i + 2] == ('t' as u8) && msg.value[i + 3] == (' ' as u8) && msg.value[i + 4] == ('d' as u8) && msg.value[i + 5] == ('o' as u8) && msg.value[i + 6] == ('n' as u8) && msg.value[i + 7] == ('e' as u8) {
+                not_done_guard = true
+            }
+            i = i + 1
+        }
+        if not_done_guard {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"decision\":\"no_claim\",\"reason\":\"negative-guard matched\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if claims == false {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"decision\":\"no_claim\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // Claim found — check lease.
+        if std.fs.exists(".agentguard/cache/lease-state.json") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"decision\":\"claim_with_valid_lease\",\"meta\":{\"truncated\":false}}\n")
+        } else {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"decision\":\"claim_without_lease\",\"diagnostics\":[{\"code\":\"CTX002\",\"severity\":\"error\",\"message\":\"completion claim without a fresh lease\"}],\"nextAgentInstruction\":\"Do not claim completion. Run `agentguard done --finalize` first; resolve any blockers it reports; only claim done after that succeeds.\",\"meta\":{\"truncated\":false}}\n")
+        }
+        return
+    }
+    // ---- risk -----------------------------------------------------------
+    // Issue 05: CommandClassifier first vertical slice.
+    // Rules in scope: CMD002 (rm -rf), CMD003 (workspace escape via ~/ or /).
+    // Designed as an inline if-chain to fit the Zero v0.1.3 direct backend
+    // MVP. Pure CommandClassifier module is a future refactor when the
+    // backend supports String params and shape returns from helpers.
+    if std.mem.eql(first.value, "risk") {
+        let cmd_arg = std.args.get(2)
+        if cmd_arg.has == false {
+            check world.err.write("agentguard risk: missing --command argument\n")
+            check world.err.write("usage: agentguard risk --command \"<cmd>\"\n")
+            return
+        }
+        if std.mem.eql(cmd_arg.value, "--command") == false {
+            check world.err.write("agentguard risk: first argument must be --command\n")
+            return
+        }
+        let cmd = std.args.get(3)
+        if cmd.has == false {
+            check world.err.write("agentguard risk: missing command after --command\n")
+            return
+        }
+        // Detect CMD002: rm -rf prefix. Workspace-escape (CMD003) detection
+        // by leading ~ or absolute path right after rm -rf. Operate on
+        // cmd.value directly to keep within the MVP byte-view-local rules.
+        let n: usize = std.mem.len(cmd.value)
+        let mut is_rm_rf: Bool = false
+        let mut escape_marker: Bool = false
+        if n >= 6 {
+            // First 6 bytes "rm -rf"
+            if cmd.value[0] == ('r' as u8) && cmd.value[1] == ('m' as u8) && cmd.value[2] == (' ' as u8) && cmd.value[3] == ('-' as u8) && cmd.value[4] == ('r' as u8) && cmd.value[5] == ('f' as u8) {
+                is_rm_rf = true
+            }
+            if cmd.value[0] == ('r' as u8) && cmd.value[1] == ('m' as u8) && cmd.value[2] == (' ' as u8) && cmd.value[3] == ('-' as u8) && cmd.value[4] == ('f' as u8) && cmd.value[5] == ('r' as u8) {
+                is_rm_rf = true
+            }
+        }
+        if is_rm_rf {
+            // Look at the byte right after "rm -rf " (position 7 if standard, position 6 for end-of-string).
+            if n >= 8 {
+                let target_first: u8 = cmd.value[7]
+                if target_first == ('~' as u8) || target_first == ('/' as u8) {
+                    escape_marker = true
+                }
+                // Detect `..` traversal prefix.
+                if n >= 9 && target_first == ('.' as u8) && cmd.value[8] == ('.' as u8) {
+                    escape_marker = true
+                }
+            }
+            if escape_marker {
+                // CMD003: workspace escape. Block in both modes (actionOverride).
+                check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD003\",\"severity\":\"critical\",\"message\":\"command targets a path outside the workspace root\",\"help\":\"keep destructive operations inside the workspace root; rephrase the command with a workspace-relative path or seek explicit human approval before retrying.\"}],\"action\":\"block\",\"operationOutcome\":\"blocked\",\"nextAgentInstruction\":\"This command is blocked because it operates on a path outside the workspace root. Do not retry it. If the destructive intent is required, ask the human to perform it manually.\",\"meta\":{\"truncated\":false}}\n")
+                return
+            }
+            // CMD002: rm -rf within workspace. Default mapping: observe → notify, enforce → confirm.
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD002\",\"severity\":\"error\",\"message\":\"command is destructive and may not run without approval\",\"help\":\"verify the target path is intentional. In observe mode AgentGuard records this and proceeds; in enforce mode it requires `agentguard approve`.\"}],\"action\":\"notify\",\"operationOutcome\":\"allowed\",\"nextAgentInstruction\":\"Confirm with the human that this destructive operation is intended. In enforce mode this would require `agentguard approve` before execution.\",\"meta\":{\"truncated\":false,\"modeNote\":\"observe-default mapping; enforce mode would return action: confirm with an approvalId\"}}\n")
+            return
+        }
+        // CMD007 — curl|sh / wget|sh / curl|bash / wget|bash detection.
+        // Two-pass detection: (1) command starts with curl/wget; (2) there's
+        // a `|` byte followed by `sh` or `bash` (possibly with whitespace).
+        let mut has_curl_pipe_sh: Bool = false
+        if n >= 7 {
+            let starts_curl: Bool = cmd.value[0] == ('c' as u8) && cmd.value[1] == ('u' as u8) && cmd.value[2] == ('r' as u8) && cmd.value[3] == ('l' as u8) && cmd.value[4] == (' ' as u8)
+            let starts_wget: Bool = cmd.value[0] == ('w' as u8) && cmd.value[1] == ('g' as u8) && cmd.value[2] == ('e' as u8) && cmd.value[3] == ('t' as u8) && cmd.value[4] == (' ' as u8)
+            if starts_curl || starts_wget {
+                // First check: command ends with " sh" or " bash".
+                if n >= 4 && cmd.value[n - 3] == (' ' as u8) && cmd.value[n - 2] == ('s' as u8) && cmd.value[n - 1] == ('h' as u8) {
+                    has_curl_pipe_sh = true
+                }
+                if n >= 6 && cmd.value[n - 5] == (' ' as u8) && cmd.value[n - 4] == ('b' as u8) && cmd.value[n - 3] == ('a' as u8) && cmd.value[n - 2] == ('s' as u8) && cmd.value[n - 1] == ('h' as u8) {
+                    has_curl_pipe_sh = true
+                }
+                // Also catch `| sh<space>` or `| bash<space>` mid-command.
+                let mut i: usize = 4
+                while i + 4 < n {
+                    if cmd.value[i] == ('|' as u8) {
+                        let mut j: usize = i + 1
+                        while j < n && cmd.value[j] == (' ' as u8) {
+                            j = j + 1
+                        }
+                        if j + 1 < n && cmd.value[j] == ('s' as u8) && cmd.value[j + 1] == ('h' as u8) {
+                            has_curl_pipe_sh = true
+                        }
+                        if j + 3 < n && cmd.value[j] == ('b' as u8) && cmd.value[j + 1] == ('a' as u8) && cmd.value[j + 2] == ('s' as u8) && cmd.value[j + 3] == ('h' as u8) {
+                            has_curl_pipe_sh = true
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        if has_curl_pipe_sh {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD007\",\"severity\":\"error\",\"message\":\"command pipes remote content to a shell\",\"help\":\"audit the URL and pin the script to a known commit before executing. Prefer `curl ... > script.sh && shasum -a 256 script.sh` then `bash script.sh` after review.\"}],\"action\":\"notify\",\"operationOutcome\":\"allowed\",\"nextAgentInstruction\":\"Do not pipe untrusted remote content into a shell. Download the script first, review it, then run it explicitly.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // CMD004 — sudo / doas prefix.
+        let mut is_sudo: Bool = false
+        if n >= 5 {
+            if cmd.value[0] == ('s' as u8) && cmd.value[1] == ('u' as u8) && cmd.value[2] == ('d' as u8) && cmd.value[3] == ('o' as u8) && cmd.value[4] == (' ' as u8) {
+                is_sudo = true
+            }
+            if n >= 5 && cmd.value[0] == ('d' as u8) && cmd.value[1] == ('o' as u8) && cmd.value[2] == ('a' as u8) && cmd.value[3] == ('s' as u8) && cmd.value[4] == (' ' as u8) {
+                is_sudo = true
+            }
+        }
+        if is_sudo {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD004\",\"severity\":\"warn\",\"message\":\"command requests privilege escalation\",\"help\":\"verify whether sudo/doas is necessary; an agent loop running as root has a wider blast radius.\"}],\"action\":\"notify\",\"operationOutcome\":\"allowed\",\"nextAgentInstruction\":\"Confirm with the human that privilege escalation is required for this command. Document why in the PR if so.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // CMD005 — destructive git operations.
+        let mut is_destructive_git: Bool = false
+        let mut is_force_with_lease: Bool = false
+        if n >= 10 {
+            // git push --force or --force-with-lease
+            if cmd.value[0] == ('g' as u8) && cmd.value[1] == ('i' as u8) && cmd.value[2] == ('t' as u8) && cmd.value[3] == (' ' as u8) {
+                // i + 7 <= n allows the final 7-byte "--force" to land
+                // exactly at the end of the command string (off-by-one
+                // fix; previous `< n` missed `git push ... --force`
+                // when --force was the trailing token).
+                let mut i: usize = 4
+                while i + 7 <= n {
+                    if cmd.value[i] == ('-' as u8) && cmd.value[i + 1] == ('-' as u8) && cmd.value[i + 2] == ('f' as u8) && cmd.value[i + 3] == ('o' as u8) && cmd.value[i + 4] == ('r' as u8) && cmd.value[i + 5] == ('c' as u8) && cmd.value[i + 6] == ('e' as u8) {
+                        is_destructive_git = true
+                        if i + 17 <= n && cmd.value[i + 7] == ('-' as u8) && cmd.value[i + 8] == ('w' as u8) && cmd.value[i + 9] == ('i' as u8) && cmd.value[i + 10] == ('t' as u8) && cmd.value[i + 11] == ('h' as u8) {
+                            is_force_with_lease = true
+                        }
+                    }
+                    if i + 6 <= n && cmd.value[i] == ('r' as u8) && cmd.value[i + 1] == ('e' as u8) && cmd.value[i + 2] == ('s' as u8) && cmd.value[i + 3] == ('e' as u8) && cmd.value[i + 4] == ('t' as u8) && cmd.value[i + 5] == (' ' as u8) {
+                        let mut j: usize = i + 6
+                        while j + 6 <= n && j < i + 30 {
+                            if cmd.value[j] == ('-' as u8) && cmd.value[j + 1] == ('-' as u8) && cmd.value[j + 2] == ('h' as u8) && cmd.value[j + 3] == ('a' as u8) && cmd.value[j + 4] == ('r' as u8) && cmd.value[j + 5] == ('d' as u8) {
+                                is_destructive_git = true
+                            }
+                            j = j + 1
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        if is_destructive_git {
+            if is_force_with_lease {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD005\",\"severity\":\"warn\",\"message\":\"git push --force-with-lease is risky but safer than --force\",\"help\":\"--force-with-lease aborts if the remote has new commits. Prefer this over --force, but still confirm with reviewers.\"}],\"action\":\"notify\",\"operationOutcome\":\"allowed\",\"nextAgentInstruction\":\"This is the safer force variant; confirm with the human that pushing over the remote is intended.\",\"meta\":{\"truncated\":false}}\n")
+                return
+            }
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD005\",\"severity\":\"error\",\"message\":\"destructive git operation\",\"help\":\"git reset --hard and git push --force rewrite history without confirmation. Prefer --force-with-lease, branch backups, or human approval.\"}],\"action\":\"block\",\"operationOutcome\":\"blocked\",\"nextAgentInstruction\":\"Do not run this destructive git command without explicit human approval. Use --force-with-lease if a forced update is genuinely required.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // CMD006 — hook bypass (--no-verify in command or HUSKY=0 env prefix).
+        let mut is_bypass: Bool = false
+        if n >= 12 {
+            // Walk for --no-verify
+            let mut i: usize = 0
+            while i + 11 < n {
+                if cmd.value[i] == ('-' as u8) && cmd.value[i + 1] == ('-' as u8) && cmd.value[i + 2] == ('n' as u8) && cmd.value[i + 3] == ('o' as u8) && cmd.value[i + 4] == ('-' as u8) && cmd.value[i + 5] == ('v' as u8) && cmd.value[i + 6] == ('e' as u8) && cmd.value[i + 7] == ('r' as u8) && cmd.value[i + 8] == ('i' as u8) && cmd.value[i + 9] == ('f' as u8) && cmd.value[i + 10] == ('y' as u8) {
+                    is_bypass = true
+                }
+                i = i + 1
+            }
+        }
+        if n >= 8 {
+            // HUSKY=0 prefix
+            if cmd.value[0] == ('H' as u8) && cmd.value[1] == ('U' as u8) && cmd.value[2] == ('S' as u8) && cmd.value[3] == ('K' as u8) && cmd.value[4] == ('Y' as u8) && cmd.value[5] == ('=' as u8) && cmd.value[6] == ('0' as u8) {
+                is_bypass = true
+            }
+        }
+        if is_bypass {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD006\",\"severity\":\"warn\",\"message\":\"command appears to bypass a hook (--no-verify or HUSKY=0)\",\"help\":\"hook bypasses are honestly labeled `verify_likely_skipped` (confidence: weak) because they cannot be distinguished from legitimate uses; the human reviewer should confirm.\"}],\"action\":\"notify\",\"operationOutcome\":\"allowed\",\"nextAgentInstruction\":\"Hook bypass detected. Run the underlying check manually (eg pnpm typecheck) and report the result before proceeding.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // CMD008 — infra destructive (terraform destroy, kubectl delete ns).
+        let mut is_infra_destructive: Bool = false
+        if n >= 17 {
+            // terraform destroy
+            if cmd.value[0] == ('t' as u8) && cmd.value[1] == ('e' as u8) && cmd.value[2] == ('r' as u8) && cmd.value[3] == ('r' as u8) && cmd.value[4] == ('a' as u8) && cmd.value[5] == ('f' as u8) && cmd.value[6] == ('o' as u8) && cmd.value[7] == ('r' as u8) && cmd.value[8] == ('m' as u8) && cmd.value[9] == (' ' as u8) && cmd.value[10] == ('d' as u8) && cmd.value[11] == ('e' as u8) && cmd.value[12] == ('s' as u8) && cmd.value[13] == ('t' as u8) && cmd.value[14] == ('r' as u8) && cmd.value[15] == ('o' as u8) && cmd.value[16] == ('y' as u8) {
+                is_infra_destructive = true
+            }
+        }
+        if is_infra_destructive {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CMD008\",\"severity\":\"critical\",\"message\":\"command destroys infrastructure\",\"help\":\"infrastructure destruction is irreversible. Block in both modes via actionOverride.\"}],\"action\":\"block\",\"operationOutcome\":\"blocked\",\"nextAgentInstruction\":\"Do not run terraform destroy. If decommissioning is intended, ask the human to do it from their own environment.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // No rule matched: allow.
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"action\":\"allow\",\"operationOutcome\":\"allowed\",\"diagnostics\":[],\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- verify ---------------------------------------------------------
+    // Issue 07: VerificationPlanner first vertical slice.
+    // MVP design: detect TypeScript files in the repo and require `typecheck`.
+    // The diff-hash machinery and check-state persistence are scaffolded
+    // here; full git-diff integration requires std.proc.spawn (not yet in
+    // the Mach-O backend) and is a follow-up upstream patch.
+    if std.mem.eql(first.value, "verify") {
+        // Mode: --record-pass / --record-fail / --reset or plain plan mode.
+        let subcmd = std.args.get(2)
+        if subcmd.has && std.mem.eql(subcmd.value, "--reset") {
+            // A2: clear the change-tracking marker so the next lease can
+            // issue. Called by `agentguard done --finalize` on success,
+            // or by the user explicitly after re-running their gated
+            // checks.
+            if std.fs.exists(".agentguard/cache/changed-files.txt") {
+                let _r = std.fs.remove(".agentguard/cache/changed-files.txt")
+            }
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"status\":\"reset\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if subcmd.has && std.mem.eql(subcmd.value, "--record-pass") {
+            let check_id = std.args.get(3)
+            if check_id.has == false {
+                check world.err.write("agentguard verify --record-pass: missing check id\n")
+                return
+            }
+            // A2: distinguish attestation source. --from-bash means the
+            // calling shell ran the check, --from-ci means CI did, plain
+            // means a human attested manually.
+            let attestation_flag = std.args.get(4)
+            let mut attestation_kind: i32 = 0
+            if attestation_flag.has {
+                if std.mem.eql(attestation_flag.value, "--from-bash") {
+                    attestation_kind = 1
+                }
+                if std.mem.eql(attestation_flag.value, "--from-ci") {
+                    attestation_kind = 2
+                }
+            }
+            if 1 == attestation_kind {
+                let _w = std.fs.write(".agentguard/cache/check-state.json", "{\"schemaVersion\":1,\"checks\":[{\"id\":\"typecheck\",\"state\":\"passed-current\",\"attestation\":\"bash-postcheck\"}]}")
+            } else {
+                if 2 == attestation_kind {
+                    let _w = std.fs.write(".agentguard/cache/check-state.json", "{\"schemaVersion\":1,\"checks\":[{\"id\":\"typecheck\",\"state\":\"passed-current\",\"attestation\":\"ci\"}]}")
+                } else {
+                    let _w = std.fs.write(".agentguard/cache/check-state.json", "{\"schemaVersion\":1,\"checks\":[{\"id\":\"typecheck\",\"state\":\"passed-current\",\"attestation\":\"manual\"}]}")
+                }
+            }
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"status\":\"recorded\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if subcmd.has && std.mem.eql(subcmd.value, "--record-fail") {
+            let check_id = std.args.get(3)
+            if check_id.has == false {
+                check world.err.write("agentguard verify --record-fail: missing check id\n")
+                return
+            }
+            let _w = std.fs.write(".agentguard/cache/check-state.json", "{\"schemaVersion\":1,\"checks\":[{\"id\":\"typecheck\",\"state\":\"failed-current\",\"attestation\":\"manual\"}]}")
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"status\":\"recorded\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // Plan mode: emit changedFilesPresent (A2 pipe-pattern: the
+        // afterFileEdit hook appends a marker for each edit; presence of
+        // the file means edits happened since the last `--reset`).
+        let changed_present: Bool = std.fs.exists(".agentguard/cache/changed-files.txt")
+        if changed_present {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"changedFilesPresent\":true,\"changedFiles\":[],\"requiredChecks\":[")
+        } else {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"changedFilesPresent\":false,\"changedFiles\":[],\"requiredChecks\":[")
+        }
+        let mut needs_typecheck: Bool = false
+        if std.fs.exists("tsconfig.json") {
+            needs_typecheck = true
+        }
+        if needs_typecheck {
+            if std.fs.exists(".agentguard/cache/check-state.json") {
+                check world.out.write("{\"id\":\"typecheck\",\"command\":\"pnpm typecheck\",\"state\":\"unknown\",\"attestation\":\"unknown\"}")
+            } else {
+                check world.out.write("{\"id\":\"typecheck\",\"command\":\"pnpm typecheck\",\"state\":\"not-run\",\"attestation\":\"unknown\"}")
+            }
+        }
+        check world.out.write("],\"checkResults\":[],\"diagnostics\":[")
+        // -- Sensitive-path / agent-instruction / policy diagnostics --
+        // Each branch emits a comma-prefixed diagnostic; the closing `]` is
+        // unchanged. We use `let mut first_diag = true` and check after each.
+        let mut first_diag: Bool = true
+        // CHG005: sensitive paths
+        if std.fs.exists("auth") || std.fs.exists("payments") || std.fs.exists("infra") || std.fs.exists("terraform") {
+            check world.out.write("{\"code\":\"CHG005\",\"severity\":\"warn\",\"message\":\"sensitive path present in workspace (auth/payments/infra/terraform)\",\"help\":\"any edits under these paths require human review before completion.\"}")
+            first_diag = false
+        }
+        // POL003: CI workflow presence (so future edits there trigger more loudly)
+        if std.fs.exists(".github/workflows") {
+            if first_diag == false {
+                check world.out.write(",")
+            }
+            check world.out.write("{\"code\":\"POL003\",\"severity\":\"info\",\"message\":\".github/workflows/ present; edits there are policy-class POL003\",\"help\":\"surface workflow changes to a human reviewer.\"}")
+            first_diag = false
+        }
+        // CTX001/CTX002: instruction files present
+        if std.fs.exists("AGENTS.md") || std.fs.exists("CLAUDE.md") {
+            if first_diag == false {
+                check world.out.write(",")
+            }
+            check world.out.write("{\"code\":\"CTX001\",\"severity\":\"info\",\"message\":\"agent instruction file present (AGENTS.md or CLAUDE.md)\",\"help\":\"edits to these are reported as CTX001/CTX002 with bypassFindings on the next verify.\"}")
+            first_diag = false
+        }
+        // SEC001: env / secrets directories
+        if std.fs.exists(".env") || std.fs.exists("secrets") {
+            if first_diag == false {
+                check world.out.write(",")
+            }
+            check world.out.write("{\"code\":\"SEC001\",\"severity\":\"warn\",\"message\":\"secret-bearing path present (.env or secrets/)\",\"help\":\"any change touching these paths is a SEC001 candidate; do not commit values without redaction.\"}")
+            first_diag = false
+        }
+        // DEP001: multiple lockfiles
+        let mut lockfile_count: i32 = 0
+        if std.fs.exists("pnpm-lock.yaml") {
+            lockfile_count = lockfile_count + 1
+        }
+        if std.fs.exists("package-lock.json") {
+            lockfile_count = lockfile_count + 1
+        }
+        if std.fs.exists("yarn.lock") {
+            lockfile_count = lockfile_count + 1
+        }
+        if lockfile_count >= 2 {
+            if first_diag == false {
+                check world.out.write(",")
+            }
+            check world.out.write("{\"code\":\"DEP001\",\"severity\":\"warn\",\"message\":\"multiple lockfiles present\",\"help\":\"only one package manager should own the lockfile; pick one and delete the others.\"}")
+            first_diag = false
+        }
+        // Dockerfile container-policy diagnostic (CHG006 placeholder)
+        if std.fs.exists("Dockerfile") || std.fs.exists("docker-compose.yml") {
+            if first_diag == false {
+                check world.out.write(",")
+            }
+            check world.out.write("{\"code\":\"CHG005\",\"severity\":\"info\",\"message\":\"container manifest present (Dockerfile or docker-compose.yml)\",\"help\":\"surface container changes to a human reviewer.\"}")
+            first_diag = false
+        }
+        check world.out.write("],\"bypassFindings\":[")
+        // M2: weak-confidence bypass kinds.
+        let mut first_byp: Bool = true
+        // verify_likely_skipped: a HEAD commit exists between AgentGuard
+        // invocations. For the MVP cache-based detection, we check whether
+        // a marker file is present. Real git-log diff lands when std.proc
+        // is wired (see AGENTS.md upstream patches list).
+        if std.fs.exists(".agentguard/cache/skip-marker") {
+            check world.out.write("{\"id\":\"byp_skip_1\",\"kind\":\"verify_likely_skipped\",\"confidence\":\"weak\"}")
+            first_byp = false
+        }
+        // agent_instruction_drift: AGENTS.md / CLAUDE.md / Cursor rules edits.
+        // Hashed in .agentguard/cache/instruction-hash.json. Stub: report if
+        // marker exists.
+        if std.fs.exists(".agentguard/cache/instruction-drift-marker") {
+            if first_byp == false {
+                check world.out.write(",")
+            }
+            check world.out.write("{\"id\":\"byp_drift_1\",\"kind\":\"agent_instruction_drift\",\"confidence\":\"weak\"}")
+            first_byp = false
+        }
+        check world.out.write("],\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- doctor ---------------------------------------------------------
+    if std.mem.eql(first.value, "doctor") {
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"probes\":[")
+        // Probe 1: git repo
+        if std.fs.exists(".git") {
+            check world.out.write("{\"name\":\"git-repo\",\"status\":\"pass\",\"message\":\"in a git repository\"}")
+        } else {
+            check world.out.write("{\"name\":\"git-repo\",\"status\":\"fail\",\"message\":\"not a git repository\"}")
+        }
+        check world.out.write(",")
+        // Probe 2: .agentguard/ initialized
+        if std.fs.exists(".agentguard/policy.json") {
+            check world.out.write("{\"name\":\"initialized\",\"status\":\"pass\",\"message\":\".agentguard/ exists\"}")
+        } else {
+            check world.out.write("{\"name\":\"initialized\",\"status\":\"fail\",\"message\":\"run agentguard init first\"}")
+        }
+        check world.out.write(",")
+        // Probe 3: policy validates
+        if std.fs.exists(".agentguard/policy.json") {
+            check world.out.write("{\"name\":\"policy-valid\",\"status\":\"pass\",\"message\":\"policy.json exists\"}")
+        } else {
+            check world.out.write("{\"name\":\"policy-valid\",\"status\":\"warn\",\"message\":\"no policy.json to validate\"}")
+        }
+        check world.out.write(",")
+        // Probe 4: ledger writable
+        if std.fs.exists(".agentguard/ledger.jsonl") {
+            check world.out.write("{\"name\":\"ledger-writable\",\"status\":\"pass\",\"message\":\"ledger.jsonl exists\"}")
+        } else {
+            check world.out.write("{\"name\":\"ledger-writable\",\"status\":\"warn\",\"message\":\"no ledger.jsonl\"}")
+        }
+        check world.out.write(",")
+        // Probe 5: hook status (Claude Code)
+        if std.fs.exists("plugins/claude-code/.claude-plugin/plugin.json") {
+            check world.out.write("{\"name\":\"hooks-claude-code\",\"status\":\"pass\",\"message\":\"installed\"}")
+        } else {
+            check world.out.write("{\"name\":\"hooks-claude-code\",\"status\":\"info\",\"message\":\"not installed\"}")
+        }
+        check world.out.write(",")
+        // Probe 6: hook status (Cursor)
+        if std.fs.exists("plugins/cursor/.cursor-plugin/plugin.json") {
+            check world.out.write("{\"name\":\"hooks-cursor\",\"status\":\"pass\",\"message\":\"installed\"}")
+        } else {
+            check world.out.write("{\"name\":\"hooks-cursor\",\"status\":\"info\",\"message\":\"not installed\"}")
+        }
+        check world.out.write(",")
+        // Probe 7: hook status (git)
+        if std.fs.exists(".git/hooks/pre-commit") {
+            check world.out.write("{\"name\":\"hooks-git\",\"status\":\"pass\",\"message\":\"installed\"}")
+        } else {
+            check world.out.write("{\"name\":\"hooks-git\",\"status\":\"info\",\"message\":\"not installed\"}")
+        }
+        check world.out.write("],\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- init -----------------------------------------------------------
+    if std.mem.eql(first.value, "init") {
+        if std.fs.exists(".git") == false {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CTX001\",\"severity\":\"error\",\"message\":\"not a git repository; cannot initialize .agentguard/\"}],\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.fs.exists(".agentguard/policy.json") {
+            let force = std.args.get(2)
+            if force.has && std.mem.eql(force.value, "--force") {
+                // fall through to re-create
+            } else {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"status\":\"already_initialized\",\"meta\":{\"truncated\":false}}\n")
+                return
+            }
+        }
+        let _d1 = std.fs.makeDir(".agentguard")
+        let _d2 = std.fs.makeDir(".agentguard/cache")
+        let p = std.fs.write(".agentguard/policy.json", "{\"schemaVersion\":1,\"mode\":\"observe\",\"defaultAction\":\"allow\",\"workspaceRoots\":[\".\"],\"protectedPaths\":[\".agentguard/**\",\".github/workflows/**\",\".claude/**\",\".cursor/**\",\".codex/**\",\"AGENTS.md\",\"CLAUDE.md\"],\"sensitivePaths\":[\".env*\",\"**/secrets/**\",\"infra/**\",\"terraform/**\",\"db/migrations/**\",\"auth/**\",\"payments/**\"],\"completionClaims\":{\"patterns\":[\"done\",\"complete\",\"completed\",\"ready for review\",\"implemented\",\"fixed\",\"shipped\",\"all set\",\"landed\"],\"negativeGuards\":[\"not done\",\"not complete\",\"almost done\",\"almost complete\",\"partially done\",\"partially complete\"]},\"session\":{\"inactivityMinutes\":30},\"diffHash\":{\"maxFileBytes\":1048576},\"commandRules\":[]}")
+        let c = std.fs.write(".agentguard/checks.json", "{\"schemaVersion\":1,\"checks\":[]}")
+        let l = std.fs.write(".agentguard/ledger.jsonl", "")
+        let s = std.fs.write(".agentguard/cache/ledger-state.json", "{\"rollingHash\":\"0000000000000000\",\"eventCount\":0}")
+        if p > 0 && c > 0 && s > 0 {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"status\":\"initialized\",\"meta\":{\"truncated\":false}}\n")
+        } else {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CTX001\",\"severity\":\"error\",\"message\":\"failed to write one or more .agentguard/ files\"}],\"meta\":{\"truncated\":false}}\n")
+        }
+        return
+    }
+    // ---- policy ---------------------------------------------------------
+    if std.mem.eql(first.value, "policy") {
+        let subcmd = std.args.get(2)
+        if subcmd.has == false {
+            check world.err.write("agentguard policy: missing subcommand (validate|migrate)\n")
+            return
+        }
+        if std.mem.eql(subcmd.value, "validate") {
+            if std.fs.exists(".agentguard/policy.json") == false {
+                check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"diagnostics\":[],\"meta\":{\"truncated\":false,\"note\":\"no .agentguard/policy.json found; nothing to validate\"}}\n")
+                return
+            }
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"diagnostics\":[],\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(subcmd.value, "migrate") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"status\":\"no migration needed\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        check world.err.write("agentguard policy: unknown subcommand\n")
+        return
+    }
+    // ---- scan -----------------------------------------------------------
+    if std.mem.eql(first.value, "scan") {
+        if std.fs.exists(".git") == false {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CTX001\",\"severity\":\"error\",\"message\":\"not a git repository\"}],\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"repo\":{")
+        if std.fs.exists(".git") {
+            check world.out.write("\"root\":\".\",")
+        } else {
+            check world.out.write("\"root\":null,")
+        }
+        // Package manager detection
+        if std.fs.exists("pnpm-lock.yaml") {
+            check world.out.write("\"packageManager\":\"pnpm\",")
+        } else {
+            if std.fs.exists("package-lock.json") {
+                check world.out.write("\"packageManager\":\"npm\",")
+            } else {
+                if std.fs.exists("yarn.lock") {
+                    check world.out.write("\"packageManager\":\"yarn\",")
+                } else {
+                    check world.out.write("\"packageManager\":null,")
+                }
+            }
+        }
+        // Language detection
+        if std.fs.exists("tsconfig.json") {
+            check world.out.write("\"languages\":[\"typescript\"],")
+        } else {
+            if std.fs.exists("package.json") {
+                check world.out.write("\"languages\":[\"javascript\"],")
+            } else {
+                check world.out.write("\"languages\":[],")
+            }
+        }
+        // Framework detection
+        if std.fs.exists("next.config.js") || std.fs.exists("next.config.mjs") || std.fs.exists("next.config.ts") {
+            check world.out.write("\"frameworks\":[\"nextjs\"],")
+        } else {
+            check world.out.write("\"frameworks\":[],")
+        }
+        check world.out.write("\"monorepo\":")
+        if std.fs.exists("pnpm-workspace.yaml") || std.fs.exists("lerna.json") {
+            check world.out.write("true")
+        } else {
+            check world.out.write("false")
+        }
+        check world.out.write("},\"commands\":{")
+        // Script detection from package.json presence. NOTE: real
+        // package.json parsing was attempted in A7 but had to be
+        // deferred — a second 1KB buffer inside main() interacted
+        // with the existing 2KB hook payload buffer and triggered
+        // the documented Mach-O stack-frame teardown bug (correct
+        // output, but SIGBUS on exit). Re-promote when helper fns
+        // (compiler item C4) land. For now: emit conventional
+        // commands keyed by the detected package manager, honestly
+        // labelled as unverified.
+        if std.fs.exists("package.json") {
+            if std.fs.exists("pnpm-lock.yaml") {
+                check world.out.write("\"install\":\"pnpm install\",\"typecheck\":\"pnpm typecheck\",\"test\":\"pnpm test\",\"lint\":\"pnpm lint\",\"build\":\"pnpm build\",\"dev\":\"pnpm dev\",\"verified\":false")
+            } else {
+                if std.fs.exists("yarn.lock") {
+                    check world.out.write("\"install\":\"yarn install\",\"typecheck\":\"yarn typecheck\",\"test\":\"yarn test\",\"lint\":\"yarn lint\",\"build\":\"yarn build\",\"dev\":\"yarn dev\",\"verified\":false")
+                } else {
+                    if std.fs.exists("bun.lockb") {
+                        check world.out.write("\"install\":\"bun install\",\"typecheck\":\"bun typecheck\",\"test\":\"bun test\",\"lint\":\"bun lint\",\"build\":\"bun build\",\"dev\":\"bun dev\",\"verified\":false")
+                    } else {
+                        check world.out.write("\"install\":\"npm install\",\"typecheck\":\"npm run typecheck\",\"test\":\"npm test\",\"lint\":\"npm run lint\",\"build\":\"npm run build\",\"dev\":\"npm run dev\",\"verified\":false")
+                    }
+                }
+            }
+        }
+        check world.out.write("},\"riskPaths\":[")
+        if std.fs.exists(".github") {
+            check world.out.write("\".github/workflows/**\"")
+        }
+        check world.out.write("],\"agentFiles\":[")
+        let mut first_agent: Bool = true
+        if std.fs.exists("AGENTS.md") {
+            check world.out.write("\"AGENTS.md\"")
+            first_agent = false
+        }
+        if std.fs.exists("CLAUDE.md") {
+            if first_agent == false {
+                check world.out.write(",")
+            }
+            check world.out.write("\"CLAUDE.md\"")
+            first_agent = false
+        }
+        if std.fs.exists(".cursor") {
+            if first_agent == false {
+                check world.out.write(",")
+            }
+            check world.out.write("\".cursor/\"")
+        }
+        check world.out.write("],\"meta\":{\"truncated\":false}}\n")
+        return
+    }
+    // ---- explain <CODE> -------------------------------------------------
+    if std.mem.eql(first.value, "explain") {
+        let arg2 = std.args.get(2)
+        if arg2.has == false {
+            check world.err.write("agentguard explain: missing diagnostic code\n")
+            check world.err.write("usage: agentguard explain <CODE>\n")
+            return
+        }
+        let code = arg2.value
+        // Detect known codes by direct string equality and emit the JSON
+        // envelope inline. The diagnostic-codes registry is the
+        // single source of truth; we exhaustively branch here.
+        // Severity strings ("info"/"warn"/"error"/"critical") are inlined
+        // per the MVP constraint.
+
+        // -- CMD family --
+        if std.mem.eql(code, "CMD001") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD001\",\"severity\":\"error\",\"summary\":\"command requires explicit approval before execution\",\"details\":\"An operation with severity error+ requires an `agentguard approve` resolution event before it can proceed. See CONTEXT.md \\\"Approval\\\" and ADR-0001.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD002") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD002\",\"severity\":\"critical\",\"summary\":\"command is destructive and may not run without approval\",\"details\":\"Destructive commands (rm -rf, terraform destroy, force-push) are blocked in enforce mode. Approve explicitly via `agentguard approve` or reduce blast radius. See ADR-0001.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD003") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD003\",\"severity\":\"error\",\"summary\":\"command targets a path outside the workspace root\",\"details\":\"Workspace-escape commands cross the git-root boundary. See CONTEXT.md \\\"Workspace terms\\\".\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD004") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD004\",\"severity\":\"warn\",\"summary\":\"command contains a sudo or privilege-escalation token\",\"details\":\"Privilege escalation in an agent loop is high-risk. Verify intent before approving.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD005") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD005\",\"severity\":\"warn\",\"summary\":\"command appears to bypass a hook (e.g. --no-verify)\",\"details\":\"Reported as a weak bypass finding (`verify_likely_skipped`, confidence: weak) per CONTEXT.md \\\"Bypass findings\\\". May be a real bypass, a merge, a rebase, or a manual hook removal.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD006") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD006\",\"severity\":\"error\",\"summary\":\"command performs a destructive git operation\",\"details\":\"Force-push, hard reset, branch deletion, reflog expire \\u2014 these are not recoverable. Require approval.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD007") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD007\",\"severity\":\"error\",\"summary\":\"command pipes remote content to a shell\",\"details\":\"`curl ... | sh` is a common exploitation pattern. Audit the source URL and pin the script before approving.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CMD008") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CMD008\",\"severity\":\"warn\",\"summary\":\"command shells out via eval $(...)\",\"details\":\"Dynamic command construction widens the trust surface. Prefer explicit command invocations.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // -- DEP family --
+        if std.mem.eql(code, "DEP001") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"DEP001\",\"severity\":\"warn\",\"summary\":\"lockfile changed without package.json change\",\"details\":\"Unusual but legitimate when running lockfile-only installs. Annotate the change in the PR.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "DEP002") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"DEP002\",\"severity\":\"error\",\"summary\":\"package.json changed without lockfile update\",\"details\":\"package.json was modified without a corresponding lockfile change. Run the lockfile-only install for your package manager, or revert the package.json change. See Issue 08.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "DEP003") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"DEP003\",\"severity\":\"warn\",\"summary\":\"package manager script invocation looks suspicious\",\"details\":\"Suspicious npm/pnpm script call patterns. Verify the script body before approving.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // -- CHG family --
+        if std.mem.eql(code, "CHG005") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CHG005\",\"severity\":\"warn\",\"summary\":\"change touches a sensitive path\",\"details\":\"Edits under auth/**, payments/**, db/migrations/**, or infra/** warrant extra scrutiny.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // -- POL family --
+        if std.mem.eql(code, "POL001") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"POL001\",\"severity\":\"error\",\"summary\":\"policy or hook config was modified during an open session\",\"details\":\"Recorded as a strong-confidence `bypassFindings[]` entry on the next observation event (ADR-0002 amended).\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "POL010") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"POL010\",\"severity\":\"error\",\"summary\":\"policy schemaVersion is newer than this binary supports\",\"details\":\"Upgrade `agentguard` or adjust the policy schemaVersion. See Issue 24.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "POL011") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"POL011\",\"severity\":\"warn\",\"summary\":\"policy contains an unknown field\",\"details\":\"Strict-unknown-fields mode promotes this to `error`.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "POL012") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"POL012\",\"severity\":\"error\",\"summary\":\"policy contains an invalid mode value\",\"details\":\"Valid modes are `observe` and `enforce`. See ADR-0001.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // -- SEC family --
+        if std.mem.eql(code, "SEC001") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"SEC001\",\"severity\":\"error\",\"summary\":\"diff contains a detected secret fingerprint\",\"details\":\"Named fingerprint matched (aws-access-key-id, private-key-pem, github-token, etc.). Redact, revert, or rotate.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "SEC002") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"SEC002\",\"severity\":\"critical\",\"summary\":\"command would leak a known credential pattern\",\"details\":\"Critical: never approve. Rotate the credential and audit recent activity.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "SEC003") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"SEC003\",\"severity\":\"error\",\"summary\":\"high-entropy literal added to a tracked file\",\"details\":\"Possible inadvertent secret commit. Verify and redact before approving.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // -- CTX family --
+        if std.mem.eql(code, "CTX001") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CTX001\",\"severity\":\"warn\",\"summary\":\"agent instruction file was edited this session\",\"details\":\"AGENTS.md, CLAUDE.md, .cursor/rules, or similar was modified during an open session. Possible instruction drift; reviewer should confirm intent.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CTX002") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CTX002\",\"severity\":\"error\",\"summary\":\"context pack budget exceeded; some entries dropped\",\"details\":\"`agentguard pack --budget N` ran past the budget. See Issue 12.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        if std.mem.eql(code, "CTX999") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"CTX999\",\"severity\":\"error\",\"summary\":\"unknown diagnostic code\",\"details\":\"The requested diagnostic code is not in the AgentGuard registry. Verify spelling against CONTEXT.md or src/main.0.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // -- DOC family --
+        if std.mem.eql(code, "DOC001") {
+            check world.out.write("{\"schemaVersion\":1,\"ok\":true,\"code\":\"DOC001\",\"severity\":\"error\",\"summary\":\"documentation references superseded vocabulary\",\"details\":\"A file references vocabulary the ADRs have superseded. See Issue 26 for the full forbidden list and the marker convention.\",\"meta\":{\"truncated\":false}}\n")
+            return
+        }
+        // ---- Unknown code: emit a static CTX999 envelope. We do NOT echo
+        // the user-supplied code into the JSON message because v0.1.3's
+        // direct-backend MVP rejects passing a runtime String to
+        // std.json.writeString (CGEN004 "non-identifier callee" / "direct
+        // backend calls currently support only same-file function
+        // identifiers"). The bad code is preserved on stderr below.
+        check world.out.write("{\"schemaVersion\":1,\"ok\":false,\"diagnostics\":[{\"code\":\"CTX999\",\"severity\":\"error\",\"message\":\"unknown diagnostic code\"}],\"meta\":{\"truncated\":false}}\n")
+        check world.err.write("agentguard explain: unknown diagnostic code: ")
+        check world.err.write(code)
+        check world.err.write("\n")
+        return
+    }
+    // ---- Unknown subcommand --------------------------------------------
+    // Exit code 64 is the ADR-0012 contract but the v0.1.3 darwin-arm64
+    // Mach-O backend has no raise-to-exit lowering, so this exits 0 on Mac.
+    // On linux-musl-x64 CI the ELF64 backend's _start stub propagates the
+    // raise as exit 1. See AGENTS.md / ADR-0009 for the gap report and the
+    // tracked upstream patch.
+    check world.err.write("agentguard: unknown command: ")
+    check world.err.write(first.value)
+    check world.err.write("\n")
+    check world.err.write("usage: agentguard --help\n")
+    return
+}

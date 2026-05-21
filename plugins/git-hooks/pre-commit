@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# AgentGuard pre-commit hook (Issue 16).
+#
+# Plan-only per ADR-0004. Calls `agentguard verify --json`. Fails the commit
+# on exit `2` (block) or exit `3` (confirm-needed). Per ADR-0012's standalone
+# exit-code contract.
+#
+# Install with: agentguard hooks install --git
+# Or copy to .git/hooks/pre-commit + chmod +x.
+
+set -u
+
+BIN="${AGENTGUARD_BIN:-agentguard}"
+
+if ! command -v "$BIN" >/dev/null 2>&1; then
+  echo "agentguard pre-commit: $BIN not on PATH; skipping (set AGENTGUARD_BIN or install)" >&2
+  exit 0
+fi
+
+OUTPUT=$("$BIN" verify --json 2>&1)
+RC=$?
+
+case "$RC" in
+  0)
+    exit 0
+    ;;
+  2)
+    echo "agentguard: commit blocked by verify (exit 2)" >&2
+    echo "$OUTPUT" >&2
+    exit 1
+    ;;
+  3)
+    echo "agentguard: commit needs approval (exit 3)" >&2
+    echo "$OUTPUT" >&2
+    echo "" >&2
+    echo "Run: agentguard approve <id> --reason '...' then retry the commit" >&2
+    exit 1
+    ;;
+  *)
+    echo "agentguard: verify exited $RC" >&2
+    echo "$OUTPUT" >&2
+    exit "$RC"
+    ;;
+esac

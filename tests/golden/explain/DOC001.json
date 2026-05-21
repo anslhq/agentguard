@@ -1,0 +1,1 @@
+{"schemaVersion":1,"ok":true,"code":"DOC001","severity":"error","summary":"documentation references superseded vocabulary","details":"A file references vocabulary the ADRs have superseded. See Issue 26 for the full forbidden list and the marker convention.","meta":{"truncated":false}}

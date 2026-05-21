@@ -1,0 +1,4 @@
+{
+  "permission": "allow",
+  "agent_message": "CMD002: command is destructive and may not run without approval. In observe mode AgentGuard records this and proceeds; in enforce mode it requires `agentguard approve`."
+}

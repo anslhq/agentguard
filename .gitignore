@@ -1,0 +1,7 @@
+/.agentguard/
+/.scratch/
+/.zero/
+/bin/agentguard
+/zerolang/
+
+.DS_Store

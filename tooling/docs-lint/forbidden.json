@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "patterns": [
+    { "pattern": "mode: \"audit\"", "severity": "error", "note": "superseded by mode: \"observe\" (ADR-0001)" },
+    { "pattern": "\"audit mode\"", "severity": "error", "note": "mode is observe (ADR-0001)" },
+    { "pattern": "require_confirmation", "severity": "error", "note": "use action: confirm (ADR-0001)" },
+    { "pattern": "risk_check", "severity": "error", "note": "use risk event (ADR-0002)" },
+    { "pattern": "command_allowed", "severity": "error", "note": "field on risk event (ADR-0002)" },
+    { "pattern": "command_denied", "severity": "error", "note": "field on risk event (ADR-0002)" },
+    { "pattern": "verify_started", "severity": "error", "note": "field on verify event (ADR-0002)" },
+    { "pattern": "verify_finished", "severity": "error", "note": "field on verify event (ADR-0002)" },
+    { "pattern": "check_failed", "severity": "error", "note": "field on verify event (ADR-0002)" },
+    { "pattern": "check_passed", "severity": "error", "note": "field on verify event (ADR-0002)" },
+    { "pattern": "completion_blocked", "severity": "error", "note": "use classify_stop event (ADR-0002)" },
+    { "pattern": "completion_allowed", "severity": "error", "note": "use classify_stop event (ADR-0002)" },
+    { "pattern": "policy_changed", "severity": "warn", "note": "POL001 diagnostic on verify event" },
+    { "pattern": "file_change_detected", "severity": "error", "note": "field on verify event (ADR-0002)" },
+    { "pattern": "context_pack_created", "severity": "error", "note": "use pack event (ADR-0002)" },
+    { "pattern": "\"lease_issued event\"", "severity": "error", "note": "lease is a record on done events (ADR-0002 amended)" },
+    { "pattern": "\"loop_budget_exhausted event\"", "severity": "error", "note": "loopBudget is a field on classify_stop" },
+    { "pattern": "\"loop_budget_exhausted ledger event\"", "severity": "error", "note": "loopBudget is a field on classify_stop" },
+    { "pattern": "\"bypass_detected event\"", "severity": "error", "note": "bypassFindings[] field (ADR-0002 amended)" },
+    { "pattern": "\"bypass_acknowledged event\"", "severity": "error", "note": "resolution event with kind: \"bypass_ack\"" },
+    { "pattern": "\"approval_granted event\"", "severity": "error", "note": "resolution event with kind: \"approval\"" },
+    { "pattern": "\"exactly six event types\"", "severity": "error", "note": "taxonomy is seven (ADR-0002 amended)" },
+    { "pattern": "\"six canonical event types\"", "severity": "error", "note": "taxonomy is seven (ADR-0002 amended)" },
+    { "pattern": "\"one shape, six types\"", "severity": "error", "note": "taxonomy is one shape, seven types" },
+    { "pattern": "\"approvals are fields\"", "severity": "error", "note": "approvals are resolution events" },
+    { "pattern": "\"approval as fields\"", "severity": "error", "note": "approvals are resolution events" },
+    { "pattern": "acknowledgments field", "severity": "error", "note": "acknowledgments are resolution events" },
+    { "pattern": "\"acknowledgments\\?\"", "severity": "error", "note": "acknowledgments are resolution events" },
+    { "pattern": "\"acknowledgments:\"", "severity": "error", "note": "acknowledgments are resolution events" },
+    { "pattern": "\"tail ledger for bypass_detected\"", "severity": "error", "note": "M2 monitors surface bypassFindings, not a retired event" },
+    { "pattern": "out-of-band `bypass_detected`", "severity": "error", "note": "no out-of-band events" },
+    { "pattern": "bypass_detected", "severity": "error", "note": "raw token retired; use bypassFindings[]", "isRawToken": true }
+  ],
+  "allowMarkers": {
+    "start": "<!-- docs-lint:allow-superseded-start -->",
+    "end": "<!-- docs-lint:allow-superseded-end -->"
+  },
+  "ignorePaths": [
+    ".git/",
+    "zerolang/",
+    "node_modules/",
+    ".zero/",
+    "tooling/docs-lint/preflight.sh",
+    "tooling/docs-lint/forbidden.json",
+    "tooling/docs-lint/docs_lint.0"
+  ]
+}

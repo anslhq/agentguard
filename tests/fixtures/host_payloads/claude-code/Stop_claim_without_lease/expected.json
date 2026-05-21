@@ -1,0 +1,4 @@
+{
+  "decision": "block",
+  "reason": "Do not claim completion. Run `agentguard done --finalize` first; resolve any blockers it reports; only claim done after that succeeds."
+}

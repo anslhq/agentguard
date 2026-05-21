@@ -1,0 +1,6 @@
+pub fun main(world: World) -> Void raises {
+    let _a1 = std.fs.appendBytes("/tmp/agentguard-append-probe.log", std.mem.span("line one\n"))
+    let _a2 = std.fs.appendBytes("/tmp/agentguard-append-probe.log", std.mem.span("line two\n"))
+    let _a3 = std.fs.appendBytes("/tmp/agentguard-append-probe.log", std.mem.span("line three\n"))
+    check world.out.write("ok\n")
+}

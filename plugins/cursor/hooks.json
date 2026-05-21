@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "agentguard risk --json --host cursor"
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "agentguard verify --record-from-bash --host cursor"
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "agentguard risk --json --host cursor --kind read"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "agentguard verify --json --host cursor --changed-only"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "agentguard session start --host cursor"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "agentguard session end --host cursor"
+      }
+    ],
+    "stop": [
+      {
+        "command": "agentguard classify-stop --host cursor",
+        "loop_limit": 3
+      }
+    ]
+  }
+}

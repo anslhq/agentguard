@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "agentguard risk --json --host claude-code"
+      },
+      {
+        "matcher": "Read",
+        "command": "agentguard risk --json --host claude-code --kind read"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "command": "agentguard verify --changed-only --json --host claude-code"
+      },
+      {
+        "matcher": "Bash",
+        "command": "agentguard verify --record-from-bash --host claude-code"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "command": "agentguard verify --record-from-bash --host claude-code"
+      }
+    ],
+    "SessionStart": [
+      {
+        "command": "agentguard session start --host claude-code"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "command": "agentguard pack --json --host claude-code --on-prompt"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "agentguard classify-stop --host claude-code"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "command": "agentguard classify-stop --host claude-code"
+      }
+    ]
+  }
+}

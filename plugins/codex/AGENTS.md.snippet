@@ -1,0 +1,21 @@
+## AgentGuard workflow
+
+Before claiming completion, run `agentguard done --finalize --json`. If it
+fails, follow the diagnostic. Do not say done, complete, fixed, shipped,
+ready for review, or equivalent until `--finalize` succeeds.
+
+For risky commands: `agentguard risk --json --command "<command>"` first.
+After edits: `agentguard verify --json`.
+After running a configured check:
+`agentguard verify --record-pass <check-id>` or
+`--record-fail <check-id> --exit-code <N>`.
+
+Follow any `nextAgentInstruction` returned by AgentGuard exactly.
+
+Enforcement caveats on Codex:
+- Codex's `PreToolUse` does not intercept all shell calls in current Codex
+  versions. AgentGuard's local enforcement on Codex is best-effort, not
+  guaranteed.
+- Codex's `permissionDecision: "ask"` is not supported for `PreToolUse`.
+  AgentGuard maps `action: "confirm"` to `permissionDecision: "deny"` with a
+  `permissionDecisionReason` telling the agent to seek approval and retry.

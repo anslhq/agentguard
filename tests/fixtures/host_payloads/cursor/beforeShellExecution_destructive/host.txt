@@ -1,0 +1,6 @@
+kind: synthetic
+host: cursor
+host_version: (synthetic shape from docs; not captured)
+agentguard_version: 0.0.1
+captured_at: 2026-05-21
+description: Cursor beforeShellExecution with `rm -rf node_modules`. CMD002 in-workspace destructive.

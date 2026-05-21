@@ -1,0 +1,6 @@
+kind: synthetic
+host: cursor
+host_version: (synthetic shape from docs; not captured)
+agentguard_version: 0.0.1
+captured_at: 2026-05-21
+description: Cursor stop hook with a completion claim and no fresh lease. Expected to set followup_message so Cursor auto-submits the next instruction.

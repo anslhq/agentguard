@@ -1,0 +1,1 @@
+{"schemaVersion":1,"ok":true,"code":"DEP002","severity":"error","summary":"package.json changed without lockfile update","details":"package.json was modified without a corresponding lockfile change. Run the lockfile-only install for your package manager, or revert the package.json change. See Issue 08.","meta":{"truncated":false}}

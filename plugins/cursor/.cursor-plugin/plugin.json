@@ -1,0 +1,6 @@
+{
+  "name": "agentguard",
+  "description": "Local-first control layer for agentic coding workflows.",
+  "version": "0.1.0",
+  "author": { "name": "AgentGuard" }
+}

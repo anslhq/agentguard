@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# AgentGuard pre-push hook (Issue 16). Calls `agentguard done --finalize`.
+# Fails the push on exit 2 or 3 per ADR-0012.
+
+set -u
+
+BIN="${AGENTGUARD_BIN:-agentguard}"
+
+if ! command -v "$BIN" >/dev/null 2>&1; then
+  echo "agentguard pre-push: $BIN not on PATH; skipping" >&2
+  exit 0
+fi
+
+OUTPUT=$("$BIN" done --finalize --json 2>&1)
+RC=$?
+
+case "$RC" in
+  0)
+    exit 0
+    ;;
+  2)
+    echo "agentguard: push blocked by done --finalize (exit 2)" >&2
+    echo "$OUTPUT" >&2
+    exit 1
+    ;;
+  3)
+    echo "agentguard: push needs approval (exit 3)" >&2
+    echo "$OUTPUT" >&2
+    exit 1
+    ;;
+  *)
+    echo "agentguard: done --finalize exited $RC" >&2
+    echo "$OUTPUT" >&2
+    exit "$RC"
+    ;;
+esac

@@ -1,0 +1,5 @@
+{
+  "session_id": "synthetic-cursor-1",
+  "command": "rm -rf node_modules",
+  "working_directory": "/Users/harsha/Developer/agentguard"
+}

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Convenience entry point for docs-lint. Delegates to the bash implementation
+# at tooling/docs-lint/docs-lint.sh. When the Zero v0.1.3 direct-backend MVP
+# lifts enough to support a Zero rewrite of the docs-lint walker (see
+# AGENTS.md "Zero v0.1.3 direct-backend MVP subset"), this shim will exec
+# the compiled Zero binary instead.
+
+exec "$(dirname "${BASH_SOURCE[0]}")/../tooling/docs-lint/docs-lint.sh" "$@"

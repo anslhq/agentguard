@@ -1,0 +1,8 @@
+{
+  "session_id": "synthetic-codex-1",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf node_modules"
+  }
+}

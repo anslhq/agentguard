@@ -1,0 +1,13 @@
+{
+  "_": "Claude Code monitors feature is marked experimental in the host's own docs. AgentGuard exposes a monitor surface here in M2 that surfaces bypass findings as side-channel notifications. Bypass findings still flow through the verify/done event bypassFindings[] array per ADR-0002 amended — this monitor surface is observability only.",
+  "version": 1,
+  "experimental": true,
+  "monitors": [
+    {
+      "id": "agentguard-bypass-findings",
+      "description": "Surface AgentGuard bypass findings as monitor notifications",
+      "command": "agentguard monitor --kind bypass --host claude-code",
+      "interval_ms": 30000
+    }
+  ]
+}

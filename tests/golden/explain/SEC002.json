@@ -1,0 +1,1 @@
+{"schemaVersion":1,"ok":true,"code":"SEC002","severity":"critical","summary":"command would leak a known credential pattern","details":"Critical: never approve. Rotate the credential and audit recent activity.","meta":{"truncated":false}}

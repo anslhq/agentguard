@@ -1,0 +1,6 @@
+kind: synthetic
+host: claude-code
+host_version: (synthetic shape from docs; not captured)
+agentguard_version: 0.0.1
+captured_at: 2026-05-21
+description: Stop hook with no completion claim. Expected to exit cleanly with decision: no_claim.

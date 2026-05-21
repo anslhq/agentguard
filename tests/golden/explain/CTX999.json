@@ -1,0 +1,1 @@
+{"schemaVersion":1,"ok":true,"code":"CTX999","severity":"error","summary":"unknown diagnostic code","details":"The requested diagnostic code is not in the AgentGuard registry. Verify spelling against CONTEXT.md or src/main.0.","meta":{"truncated":false}}

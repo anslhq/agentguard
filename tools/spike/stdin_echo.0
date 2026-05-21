@@ -1,0 +1,22 @@
+// Issue 00 spike: stdin reading via path-form std.fs.read.
+//
+// Outcome (per AGENTS.md "Stdin reading"): path-form `std.fs.read("/dev/stdin", buf)`
+// reads up to `buf.len` bytes from stdin into the caller-provided buffer.
+//
+// Builds on darwin-arm64 via `--emit obj` + `cc` link with the host runtime
+// shim (zerolang/scripts/test-native.sh:851-857 pattern). Builds direct on
+// linux-musl-x64 with no shim. This is ADR-0009 outcome A for the std.mem.eql
+// pieces and a partial-A / partial-B for hosted I/O (works at the source
+// level; needs the conformance-style link step on darwin-arm64 for runtime).
+
+pub fun main(world: World) -> Void raises {
+    let mut buf: [256]u8 = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+    let n = std.fs.read("/dev/stdin", buf)
+    if n > 0 {
+        let span: Span<u8> = buf
+        check world.out.write("stdin-bytes=")
+        check world.out.write(span)
+    } else {
+        check world.out.write("stdin-empty\n")
+    }
+}

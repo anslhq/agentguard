@@ -1,0 +1,17 @@
+{
+  "package": { "name": "agentguard", "version": "0.0.1", "license": "MIT" },
+  "targets": {
+    "cli": {
+      "kind": "exe",
+      "main": "src/main.0",
+      "defaultTarget": "darwin-arm64",
+      "devTarget": "host",
+      "releaseProfile": "release-small"
+    }
+  },
+  "deps": {},
+  "profiles": {
+    "dev": { "inherits": "dev" },
+    "release-small": { "inherits": "release-small" }
+  }
+}

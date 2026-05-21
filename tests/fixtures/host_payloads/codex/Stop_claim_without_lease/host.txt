@@ -1,0 +1,6 @@
+kind: synthetic
+host: codex
+host_version: (synthetic shape from docs; not captured)
+agentguard_version: 0.0.1
+captured_at: 2026-05-21
+description: Codex Stop hook with completion claim and no fresh lease. Codex creates a continuation prompt using `reason` from decision=block.

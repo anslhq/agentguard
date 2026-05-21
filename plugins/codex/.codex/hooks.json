@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "agentguard session start --host codex"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "matcher": "Bash",
+        "command": "agentguard risk --json --host codex"
+      },
+      {
+        "type": "command",
+        "matcher": "apply_patch",
+        "command": "agentguard risk --json --host codex --kind edit"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "matcher": "Bash",
+        "command": "agentguard verify --record-from-bash --host codex"
+      },
+      {
+        "type": "command",
+        "matcher": "apply_patch",
+        "command": "agentguard verify --json --host codex --changed-only"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "agentguard pack --json --host codex --on-prompt"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "agentguard classify-stop --host codex"
+      }
+    ]
+  }
+}

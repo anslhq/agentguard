@@ -1,0 +1,71 @@
+name: agentguard
+# Issue 17: GitHub Actions workflow that runs `agentguard verify --ci` and
+# `agentguard done --finalize --ci` as the authoritative gate in CI.
+#
+# - fetch-depth: 0 so diff-against-base computations have history (ADR-0011).
+# - Each user check runs with continue-on-error: true so failed checks still
+#   reach the AgentGuard record-fail step. AgentGuard is what fails the
+#   workflow, not the raw check, so failures are recorded (ADR-0010 / Issue 17).
+# - CI runs --ci mode which forces enforce regardless of local policy and
+#   uses attestation: ci-observed.
+
+on:
+  pull_request:
+    branches: ['**']
+
+jobs:
+  agentguard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for diff-against-base)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+        continue-on-error: true
+
+      - name: Install agentguard
+        run: |
+          # Replace with the real installer / release once a release is published.
+          # For now, build from the local checkout.
+          test -x ./bin/agentguard || echo "agentguard binary not present; failing"
+          test -x ./bin/agentguard
+
+      - name: Initialize AgentGuard (idempotent)
+        run: ./bin/agentguard init
+
+      - name: Run typecheck (recorded by AgentGuard)
+        id: typecheck
+        run: pnpm typecheck
+        continue-on-error: true
+
+      - name: Record typecheck result
+        run: |
+          if [ "${{ steps.typecheck.outcome }}" = "success" ]; then
+            ./bin/agentguard verify --record-pass typecheck --source ci-observed --exit-code 0
+          else
+            ./bin/agentguard verify --record-fail typecheck --source ci-observed --exit-code 1
+          fi
+
+      - name: Run tests (recorded by AgentGuard)
+        id: tests
+        run: pnpm test
+        continue-on-error: true
+
+      - name: Record test result
+        run: |
+          if [ "${{ steps.tests.outcome }}" = "success" ]; then
+            ./bin/agentguard verify --record-pass unit-tests --source ci-observed --exit-code 0
+          else
+            ./bin/agentguard verify --record-fail unit-tests --source ci-observed --exit-code 1
+          fi
+
+      - name: AgentGuard verify (--ci, enforce mode)
+        run: ./bin/agentguard verify --ci --json
+
+      - name: AgentGuard done --finalize (--ci, authoritative gate)
+        run: ./bin/agentguard done --finalize --ci --json

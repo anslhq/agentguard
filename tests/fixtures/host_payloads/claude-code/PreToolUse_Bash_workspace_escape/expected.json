@@ -1,0 +1,6 @@
+{
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "This command is blocked because it operates on a path outside the workspace root. Do not retry it. If the destructive intent is required, ask the human to perform it manually."
+  }
+}

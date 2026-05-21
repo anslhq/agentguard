@@ -1,0 +1,21 @@
+// Probe: separate destination buffer, copy bytes, write it.
+pub fun main(world: World) -> Void raises {
+    let mut src: [64]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    src[0] = ('A' as u8)
+    src[1] = ('B' as u8)
+    src[2] = ('C' as u8)
+    src[3] = ('D' as u8)
+    src[4] = ('E' as u8)
+
+    let mut dst: [16]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut i: usize = 0
+    while i < 5 {
+        dst[i] = src[i]
+        i = i + 1
+    }
+    let src_span: Span<u8> = src
+    let dst_span: Span<u8> = dst
+    let _w1 = std.fs.writeBytes("/tmp/agentguard-subspan-probe3-src.txt", src_span)
+    let _w2 = std.fs.writeBytes("/tmp/agentguard-subspan-probe3-dst.txt", dst_span)
+    check world.out.write("ok\n")
+}

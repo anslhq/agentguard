@@ -1,0 +1,19 @@
+---
+description: AgentGuard workflow integration. Triggers on every turn.
+alwaysApply: true
+---
+
+# AgentGuard
+
+This repo uses AgentGuard to risk-gate commands, verify edits, and gate task
+completion behind a fresh lease.
+
+When AgentGuard's `nextAgentInstruction` appears in tool output, follow it
+exactly. When `agentguard done --json` returns `leaseDecision: "none"`, do not
+claim completion — run `agentguard done --finalize --json` first and resolve
+any blockers it reports.
+
+Before destructive commands: `agentguard risk --json --command "..."` first.
+After edits: `agentguard verify --json`.
+After running a configured check: `agentguard verify --record-pass <id>` or
+`--record-fail <id> --exit-code <N>`.

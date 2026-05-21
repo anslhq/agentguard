@@ -1,0 +1,13 @@
+// Probe: copy bytes from one buf into another, then write that whole buf as Span<u8>.
+pub fun main(world: World) -> Void raises {
+    let mut buf: [64]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    buf[0] = ('H' as u8)
+    buf[1] = ('e' as u8)
+    buf[2] = ('l' as u8)
+    buf[3] = ('l' as u8)
+    buf[4] = ('o' as u8)
+    buf[5] = ('\n' as u8)
+    let full_span: Span<u8> = buf
+    let _w = std.fs.writeBytes("/tmp/agentguard-subspan-probe2.txt", full_span)
+    check world.out.write("ok\n")
+}
