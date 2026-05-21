@@ -523,12 +523,28 @@ RESULT=$(echo '{"model":"claude-opus-4-7","command":"git push origin main"}' | "
 assert_field "cursor.beforeShellExecution safe git push" "$RESULT" ".permission" "allow"
 
 # -- AUDIT GAP: chained commands must trigger detection -----------------
-RESULT=$(echo '{"model":"claude-opus-4-7","command":"cd /tmp && rm -rf /etc/passwd"}' | "$BIN" hook --host cursor --event beforeShellExecution)
-if jq -e '.agent_message | contains("CMD002")' <<<"$RESULT" >/dev/null; then
-  echo "  ok: chained rm -rf detected as CMD002"
+# Gap 5 close: mid-chain rm -rf now resolves its target like front-anchored
+# rm -rf does. /etc/passwd is outside workspace_roots → CMD003 deny.
+# (Pre-gap-5 this was CMD002 notify because the target offset was unknown.)
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cd /tmp && rm -rf /etc/passwd","workspace_roots":["/proj"]}' | "$BIN" hook --host cursor --event beforeShellExecution)
+if jq -e '.user_message | contains("CMD003")' <<<"$RESULT" >/dev/null; then
+  echo "  ok: chained rm -rf with escape target → CMD003 deny"
   PASS=$((PASS + 1))
 else
-  echo "FAIL: chained rm -rf bypasses detection (audit gap)" >&2
+  echo "FAIL: chained rm -rf with escape target should deny CMD003" >&2
+  echo "  got: $RESULT" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# And the converse: mid-chain rm -rf inside the workspace stays CMD002.
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cd /proj && rm -rf node_modules","workspace_roots":["/proj"]}' | "$BIN" hook --host cursor --event beforeShellExecution)
+perm=$(jq -r '.permission' <<<"$RESULT")
+has_cmd002=$(jq -r '.agent_message // "" | contains("CMD002")' <<<"$RESULT")
+if [[ "$perm" == "allow" && "$has_cmd002" == "true" ]]; then
+  echo "  ok: chained rm -rf inside workspace → CMD002 notify"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: chained rm -rf inside workspace should notify CMD002" >&2
   echo "  got: $RESULT" >&2
   FAIL=$((FAIL + 1))
 fi
@@ -572,6 +588,64 @@ fi
 # Negative: a path containing 'rm' substring must NOT trigger CMD002.
 RESULT=$(echo '{"model":"claude-opus-4-7","command":"ls /var/log/firmware"}' | "$BIN" hook --host cursor --event beforeShellExecution)
 assert_field "path containing 'rm' substring still allowed" "$RESULT" ".permission" "allow"
+
+# -- SEC006: shell-mediated secret reads --------------------------------
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cat .env"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 cat .env" "$RESULT" ".permission" "deny"
+if jq -e '.user_message | contains("SEC006")' <<<"$RESULT" >/dev/null; then
+  echo "  ok: SEC006 message present"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: SEC006 message missing" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"head .env.production"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 head .env.production" "$RESULT" ".permission" "deny"
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cat /Users/me/.ssh/id_rsa"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 cat ssh private key" "$RESULT" ".permission" "deny"
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"grep SECRET ~/.aws/credentials"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 grep aws credentials" "$RESULT" ".permission" "deny"
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"source .env"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 source .env" "$RESULT" ".permission" "deny"
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cd /tmp && cat ~/.ssh/id_ed25519"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 chained cat ssh key" "$RESULT" ".permission" "deny"
+
+# SEC006 allowlist: .env.example / .envrc / id_*.pub are not blocked.
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cat .env.example"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 allowlist .env.example" "$RESULT" ".permission" "allow"
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cat .envrc"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 allowlist .envrc" "$RESULT" ".permission" "allow"
+
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cat ~/.ssh/id_rsa.pub"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 allowlist id_rsa.pub" "$RESULT" ".permission" "allow"
+
+# SEC006 negative: non-reader command with sensitive path → allow.
+# (ls .env doesn't read the contents — boundary check.)
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"ls .env"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 non-reader ls .env allowed" "$RESULT" ".permission" "allow"
+
+# SEC006 negative: reader on non-sensitive path → allow.
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"cat /tmp/foo.txt"}' | "$BIN" hook --host cursor --event beforeShellExecution)
+assert_field "SEC006 reader on /tmp/foo allowed" "$RESULT" ".permission" "allow"
+
+# -- JSON-escape parser: quoted strings don't truncate detection --------
+# Pre-gap-2 the parser stopped at the first \" so destructive commands
+# inside or after a quoted argument went undetected.
+RESULT=$(echo '{"model":"claude-opus-4-7","command":"echo \"hi\" && rm -rf /etc/passwd","workspace_roots":["/proj"]}' | "$BIN" hook --host cursor --event beforeShellExecution)
+if jq -e '.user_message | contains("CMD003")' <<<"$RESULT" >/dev/null; then
+  echo "  ok: JSON-escape parser sees past quoted strings (CMD003 fires)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: JSON-escape parser truncates at first \\\" (CMD003 missed)" >&2
+  echo "  got: $RESULT" >&2
+  FAIL=$((FAIL + 1))
+fi
 
 # -- stop hook scope: outside agentguard project --------------------
 

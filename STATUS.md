@@ -24,7 +24,7 @@ Last updated against the third session of the build (post-audit pass).
 |---|---|---|
 | `hook --host cursor --event beforeShellExecution` | **verified** | Live `~/.cursor/hooks.json` enforce mode is on. `tests/run-host-adapter.sh` covers 94 assertions including chained commands. |
 | `hook --host cursor --event beforeReadFile` | **verified** | SEC001 (.env + allowlist), SEC002 (SSH), SEC003 (cloud creds), SEC004 (.netrc), SEC005 (registry tokens). |
-| `hook --host cursor --event afterFileEdit` | **verified** | Appends to `changed-files.txt` and writes `bypass-findings.json` for protected paths. |
+| `hook --host cursor --event afterFileEdit` | **verified** | Appends to `changed-files.txt` and writes `bypass-findings.json` for protected paths. Plugin and binary-emitted wiring no longer set `--log-only`, so this enforcement actually fires in production (a real bug fixed mid-session). |
 | `hook --host cursor --event afterShellExecution` | **partially_wired** | Currently `--log-only`. Hook fires and payload is captured; no enforcement decisions yet. |
 | `hook --host cursor --event stop` | **verified** | Real Cursor stop payload shape (`status`, no `last_assistant_message`). Inside `.agentguard/` repo + status≠aborted + no lease → injects `followup_message`. |
 | `hook --host cursor --event sessionStart/sessionEnd` | **partially_wired** | Log-only. Real `session` subcommand (B3) writes state separately. |
@@ -40,6 +40,9 @@ Last updated against the third session of the build (post-audit pass).
 | SEC003 — cloud creds | **verified** | `~/.aws/credentials`, `~/.aws/config`, `~/.kube/config`, `~/.config/gcloud/`. |
 | SEC004 — `.netrc` | **verified** | Basename match. |
 | SEC005 — `.npmrc` / `.pypirc` | **verified** | Basename match. |
+| SEC006 — shell-mediated secret reads | **verified** | `cat`, `grep`, `head`, `tail`, `less`, `more`, `awk`, `sed`, `source`, `.`, `xxd`, `od`, `strings` + sensitive path (front-anchored or mid-chain). Honors SEC001 allowlist (`.env.example`, `.envrc`, `id_*.pub`, etc). |
+| JSON-escape parser | **verified** | `cmd_end` walker respects `\"` inside the string. Pre-fix, quoted arguments truncated the command and downstream rules missed destructive payloads. |
+| Mid-chain CMD003 target resolution | **verified** | `cd /tmp && rm -rf /etc/passwd` now resolves the target offset correctly and denies as CMD003 (was conservatively notify-only CMD002 in the previous commit). |
 | Model-family-aware response phrasing | **verified** | Claude, GPT/o-series, Gemini, sandboxed each get tuned `agent_message`. |
 | Stop-hook project scoping | **verified** | Silent passthrough outside `.agentguard/` repo. |
 
@@ -84,7 +87,7 @@ Last updated against the third session of the build (post-audit pass).
 | `approve <id>` / `ack <code>` / `ack-bypass <id>` | **verified** | All append to ledger; `ack-bypass` removes `bypass-findings.json`. |
 | `lease` | **partially_wired** | Stub subcommand; the lease state machine lives inside `done --finalize`. Standalone `lease check/inspect` is not yet a CLI surface. |
 | `classify-stop` | **verified** | Reads stdin payload or `--message` flag and emits decision. |
-| `hooks install --host cursor` | **verified** | Prints canonical fragment + jq merge command. Claude/Codex correctly error as deferred. |
+| `hooks install --host cursor` | **verified** | Prints canonical fragment + jq merge command. Plugin file (`plugins/cursor/hooks.json`) structurally matches the binary emit (PATH-relative for the plugin, absolute path for the binary install). Test asserts they stay in sync. Claude/Codex correctly error as deferred. |
 | `policy validate` / `policy migrate` | **partially_wired** | Always returns ok; no real validator. |
 
 ---

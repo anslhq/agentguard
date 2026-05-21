@@ -311,10 +311,29 @@ pub fun main(world: World) -> Void raises {
                 check world.out.write("{\"permission\":\"allow\"}\n")
                 return
             }
-            // Walk to the closing quote.
+            // Walk to the closing quote, respecting JSON-escaped \"
+            // sequences. Cursor JSON-encodes inner `"` as `\"`, so a
+            // payload command of `git commit -m "hello"` arrives as
+            // `git commit -m \"hello\"`. The previous implementation
+            // stopped at the first `\"`, truncating the command and
+            // missing destructive patterns later in the string.
+            // We stop at a `"` only when the previous byte is NOT `\`.
+            // Edge case: `\\"` (escaped backslash followed by string
+            // end) is technically a terminator but is vanishingly rare
+            // in shell commands; we accept that imprecision.
             let mut cmd_end: usize = cmd_start
-            while cmd_end < plen && payload[cmd_end] != ('"' as u8) {
-                cmd_end = cmd_end + 1
+            let mut cmd_terminated: Bool = false
+            while cmd_end < plen && cmd_terminated == false {
+                if payload[cmd_end] == ('"' as u8) {
+                    if cmd_end > cmd_start && payload[cmd_end - 1] == ('\\' as u8) {
+                        // escaped quote, keep going
+                        cmd_end = cmd_end + 1
+                    } else {
+                        cmd_terminated = true
+                    }
+                } else {
+                    cmd_end = cmd_end + 1
+                }
             }
             let clen: usize = cmd_end - cmd_start
 
@@ -336,6 +355,7 @@ pub fun main(world: World) -> Void raises {
             // through is higher than the cost of a false-positive on a
             // notify-class warning.
             let mut chain_has_rm_rf: Bool = false
+            let mut chain_rm_rf_target_offset: usize = 0
             let mut chain_has_terraform_destroy: Bool = false
             let mut chain_has_curl_pipe: Bool = false
             let mut chain_has_git_force: Bool = false
@@ -362,10 +382,15 @@ pub fun main(world: World) -> Void raises {
                     }
                 }
                 if is_boundary {
-                    // rm -rf (6 chars). Also rm -fr.
+                    // rm -rf (6 chars). Also rm -fr. Record the target
+                    // offset (= ci + 7 if cmd has "rm -rf X" form) so
+                    // CMD003 can resolve workspace-escape on mid-chain rm.
                     if ci + 6 <= cmd_end {
                         if payload[ci] == ('r' as u8) && payload[ci + 1] == ('m' as u8) && payload[ci + 2] == (' ' as u8) && payload[ci + 3] == ('-' as u8) && (payload[ci + 4] == ('r' as u8) || payload[ci + 4] == ('f' as u8)) && (payload[ci + 5] == ('f' as u8) || payload[ci + 5] == ('r' as u8)) {
-                            chain_has_rm_rf = true
+                            if chain_has_rm_rf == false {
+                                chain_has_rm_rf = true
+                                chain_rm_rf_target_offset = ci + 7
+                            }
                         }
                     }
                     // terraform destroy (17 chars).
@@ -441,12 +466,280 @@ pub fun main(world: World) -> Void raises {
                 nv = nv + 1
             }
 
+            // SEC006 — shell-mediated secret reads. The agent should not
+            // be able to bypass beforeReadFile (which blocks .env, SSH
+            // keys, cloud creds, etc) by running `cat .env` or
+            // `grep -r SECRET ~/.aws/`. We detect:
+            //   (a) a "reader" command at a chain boundary
+            //   (b) anywhere in the command, a sensitive path substring
+            // If both hold, block.
+            let mut chain_has_reader: Bool = false
+            // Re-scan at each boundary.
+            let mut sci: usize = cmd_start
+            while sci < cmd_end {
+                let mut sis_boundary: Bool = false
+                if sci == cmd_start {
+                    sis_boundary = true
+                } else {
+                    let sprev: u8 = payload[sci - 1]
+                    if sprev == (';' as u8) || sprev == ('|' as u8) || sprev == ('&' as u8) || sprev == ('\n' as u8) {
+                        sis_boundary = true
+                    }
+                    if sprev == (' ' as u8) && sci >= cmd_start + 2 {
+                        let sprev2: u8 = payload[sci - 2]
+                        if sprev2 == (';' as u8) || sprev2 == ('|' as u8) || sprev2 == ('&' as u8) || sprev2 == ('\n' as u8) {
+                            sis_boundary = true
+                        }
+                    }
+                }
+                if sis_boundary {
+                    // cat (4) / less (5) / more (5) / head (5) / tail (5)
+                    // grep (5) / awk (4) / sed (4) / xxd (4) / od (3)
+                    // strings (8) / source (7) / dot (.<space>, 2)
+                    if sci + 4 <= cmd_end {
+                        if payload[sci] == ('c' as u8) && payload[sci + 1] == ('a' as u8) && payload[sci + 2] == ('t' as u8) && payload[sci + 3] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('a' as u8) && payload[sci + 1] == ('w' as u8) && payload[sci + 2] == ('k' as u8) && payload[sci + 3] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('s' as u8) && payload[sci + 1] == ('e' as u8) && payload[sci + 2] == ('d' as u8) && payload[sci + 3] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('x' as u8) && payload[sci + 1] == ('x' as u8) && payload[sci + 2] == ('d' as u8) && payload[sci + 3] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('o' as u8) && payload[sci + 1] == ('d' as u8) && payload[sci + 2] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('.' as u8) && payload[sci + 1] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                    }
+                    if sci + 5 <= cmd_end {
+                        if payload[sci] == ('l' as u8) && payload[sci + 1] == ('e' as u8) && payload[sci + 2] == ('s' as u8) && payload[sci + 3] == ('s' as u8) && payload[sci + 4] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('m' as u8) && payload[sci + 1] == ('o' as u8) && payload[sci + 2] == ('r' as u8) && payload[sci + 3] == ('e' as u8) && payload[sci + 4] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('h' as u8) && payload[sci + 1] == ('e' as u8) && payload[sci + 2] == ('a' as u8) && payload[sci + 3] == ('d' as u8) && payload[sci + 4] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('t' as u8) && payload[sci + 1] == ('a' as u8) && payload[sci + 2] == ('i' as u8) && payload[sci + 3] == ('l' as u8) && payload[sci + 4] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                        if payload[sci] == ('g' as u8) && payload[sci + 1] == ('r' as u8) && payload[sci + 2] == ('e' as u8) && payload[sci + 3] == ('p' as u8) && payload[sci + 4] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                    }
+                    if sci + 7 <= cmd_end {
+                        if payload[sci] == ('s' as u8) && payload[sci + 1] == ('o' as u8) && payload[sci + 2] == ('u' as u8) && payload[sci + 3] == ('r' as u8) && payload[sci + 4] == ('c' as u8) && payload[sci + 5] == ('e' as u8) && payload[sci + 6] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                    }
+                    if sci + 8 <= cmd_end {
+                        if payload[sci] == ('s' as u8) && payload[sci + 1] == ('t' as u8) && payload[sci + 2] == ('r' as u8) && payload[sci + 3] == ('i' as u8) && payload[sci + 4] == ('n' as u8) && payload[sci + 5] == ('g' as u8) && payload[sci + 6] == ('s' as u8) && payload[sci + 7] == (' ' as u8) {
+                            chain_has_reader = true
+                        }
+                    }
+                }
+                sci = sci + 1
+            }
+
+            // Sensitive-path substring detection. Same surface as SEC001–005
+            // but matched globally inside the command rather than as a
+            // basename. We accept a wider net here because a reader+path
+            // combination is high-confidence harmful.
+            let mut sec_path_kind: i32 = 0
+            // 1: .env (with allowlist for safe suffixes)
+            // 2: SSH private key
+            // 3: AWS / GCP / kube
+            // 4: .netrc / .npmrc / .pypirc
+            let mut shi: usize = cmd_start
+            while shi + 4 <= cmd_end {
+                // .env — substring match, then check basename suffix.
+                // We look for "/.env" or " .env" or "=.env" or .env at
+                // cmd_start (4-byte boundary-anchored match; the suffix
+                // allowlist below is conditional on having more bytes).
+                if payload[shi] == ('.' as u8) && payload[shi + 1] == ('e' as u8) && payload[shi + 2] == ('n' as u8) && payload[shi + 3] == ('v' as u8) {
+                    // Boundary check: previous byte should be /, space, =, or be cmd_start.
+                    let mut env_boundary: Bool = false
+                    if shi == cmd_start {
+                        env_boundary = true
+                    } else {
+                        let eprev: u8 = payload[shi - 1]
+                        if eprev == ('/' as u8) || eprev == (' ' as u8) || eprev == ('=' as u8) {
+                            env_boundary = true
+                        }
+                    }
+                    if env_boundary {
+                        // Now check if the suffix is allowlisted. If the
+                        // next byte is end / space / boundary / `.local`
+                        // / `.production` / etc → it's a real secret.
+                        // If next bytes spell `.example`/`.sample`/`rc`/
+                        // `.template`/`.test`/`.tests`/`.defaults`/`.ci`
+                        // → allowlisted.
+                        let mut allowlisted: Bool = false
+                        let next_after: usize = shi + 4
+                        // rc (2)
+                        if next_after + 2 <= cmd_end {
+                            if payload[next_after] == ('r' as u8) && payload[next_after + 1] == ('c' as u8) {
+                                allowlisted = true
+                            }
+                        }
+                        // .example (8)
+                        if next_after + 8 <= cmd_end {
+                            if payload[next_after] == ('.' as u8) && payload[next_after + 1] == ('e' as u8) && payload[next_after + 2] == ('x' as u8) && payload[next_after + 3] == ('a' as u8) && payload[next_after + 4] == ('m' as u8) && payload[next_after + 5] == ('p' as u8) && payload[next_after + 6] == ('l' as u8) && payload[next_after + 7] == ('e' as u8) {
+                                allowlisted = true
+                            }
+                        }
+                        // .sample (7)
+                        if next_after + 7 <= cmd_end {
+                            if payload[next_after] == ('.' as u8) && payload[next_after + 1] == ('s' as u8) && payload[next_after + 2] == ('a' as u8) && payload[next_after + 3] == ('m' as u8) && payload[next_after + 4] == ('p' as u8) && payload[next_after + 5] == ('l' as u8) && payload[next_after + 6] == ('e' as u8) {
+                                allowlisted = true
+                            }
+                        }
+                        // .template (9)
+                        if next_after + 9 <= cmd_end {
+                            if payload[next_after] == ('.' as u8) && payload[next_after + 1] == ('t' as u8) && payload[next_after + 2] == ('e' as u8) && payload[next_after + 3] == ('m' as u8) && payload[next_after + 4] == ('p' as u8) && payload[next_after + 5] == ('l' as u8) && payload[next_after + 6] == ('a' as u8) && payload[next_after + 7] == ('t' as u8) && payload[next_after + 8] == ('e' as u8) {
+                                allowlisted = true
+                            }
+                        }
+                        // .test (5)
+                        if next_after + 5 <= cmd_end {
+                            if payload[next_after] == ('.' as u8) && payload[next_after + 1] == ('t' as u8) && payload[next_after + 2] == ('e' as u8) && payload[next_after + 3] == ('s' as u8) && payload[next_after + 4] == ('t' as u8) {
+                                allowlisted = true
+                            }
+                        }
+                        if allowlisted == false {
+                            sec_path_kind = 1
+                        }
+                    }
+                }
+                shi = shi + 1
+            }
+            // SSH private keys: /.ssh/id_<something>
+            let mut shi2: usize = cmd_start
+            while shi2 + 11 <= cmd_end {
+                if payload[shi2] == ('/' as u8) && payload[shi2 + 1] == ('.' as u8) && payload[shi2 + 2] == ('s' as u8) && payload[shi2 + 3] == ('s' as u8) && payload[shi2 + 4] == ('h' as u8) && payload[shi2 + 5] == ('/' as u8) && payload[shi2 + 6] == ('i' as u8) && payload[shi2 + 7] == ('d' as u8) && payload[shi2 + 8] == ('_' as u8) {
+                    // Is it the .pub? If so, allow.
+                    // Walk to end of word (space, end, separator).
+                    let mut sse: usize = shi2 + 9
+                    while sse < cmd_end {
+                        let scb: u8 = payload[sse]
+                        if scb == (' ' as u8) || scb == (';' as u8) || scb == ('|' as u8) || scb == ('&' as u8) || scb == ('\n' as u8) || scb == ('"' as u8) {
+                            sse = cmd_end + 1
+                        } else {
+                            sse = sse + 1
+                        }
+                    }
+                    // Now sse is past end-of-word. Check last 4 chars for .pub.
+                    let key_end: usize = sse - 1
+                    if key_end >= shi2 + 12 && payload[key_end - 3] == ('.' as u8) && payload[key_end - 2] == ('p' as u8) && payload[key_end - 1] == ('u' as u8) && payload[key_end] == ('b' as u8) {
+                        // public key — allowlisted
+                    } else {
+                        sec_path_kind = 2
+                    }
+                }
+                shi2 = shi2 + 1
+            }
+            // AWS / GCP / kube
+            let mut shi3: usize = cmd_start
+            while shi3 + 17 <= cmd_end {
+                if payload[shi3] == ('/' as u8) && payload[shi3 + 1] == ('.' as u8) && payload[shi3 + 2] == ('a' as u8) && payload[shi3 + 3] == ('w' as u8) && payload[shi3 + 4] == ('s' as u8) && payload[shi3 + 5] == ('/' as u8) {
+                    if shi3 + 17 <= cmd_end && payload[shi3 + 6] == ('c' as u8) && payload[shi3 + 7] == ('r' as u8) && payload[shi3 + 8] == ('e' as u8) && payload[shi3 + 9] == ('d' as u8) && payload[shi3 + 10] == ('e' as u8) && payload[shi3 + 11] == ('n' as u8) && payload[shi3 + 12] == ('t' as u8) && payload[shi3 + 13] == ('i' as u8) && payload[shi3 + 14] == ('a' as u8) && payload[shi3 + 15] == ('l' as u8) && payload[shi3 + 16] == ('s' as u8) {
+                        sec_path_kind = 3
+                    }
+                    if shi3 + 12 <= cmd_end && payload[shi3 + 6] == ('c' as u8) && payload[shi3 + 7] == ('o' as u8) && payload[shi3 + 8] == ('n' as u8) && payload[shi3 + 9] == ('f' as u8) && payload[shi3 + 10] == ('i' as u8) && payload[shi3 + 11] == ('g' as u8) {
+                        sec_path_kind = 3
+                    }
+                }
+                if shi3 + 13 <= cmd_end && payload[shi3] == ('/' as u8) && payload[shi3 + 1] == ('.' as u8) && payload[shi3 + 2] == ('k' as u8) && payload[shi3 + 3] == ('u' as u8) && payload[shi3 + 4] == ('b' as u8) && payload[shi3 + 5] == ('e' as u8) && payload[shi3 + 6] == ('/' as u8) && payload[shi3 + 7] == ('c' as u8) && payload[shi3 + 8] == ('o' as u8) && payload[shi3 + 9] == ('n' as u8) && payload[shi3 + 10] == ('f' as u8) && payload[shi3 + 11] == ('i' as u8) && payload[shi3 + 12] == ('g' as u8) {
+                    sec_path_kind = 3
+                }
+                if shi3 + 16 <= cmd_end && payload[shi3] == ('/' as u8) && payload[shi3 + 1] == ('.' as u8) && payload[shi3 + 2] == ('c' as u8) && payload[shi3 + 3] == ('o' as u8) && payload[shi3 + 4] == ('n' as u8) && payload[shi3 + 5] == ('f' as u8) && payload[shi3 + 6] == ('i' as u8) && payload[shi3 + 7] == ('g' as u8) && payload[shi3 + 8] == ('/' as u8) && payload[shi3 + 9] == ('g' as u8) && payload[shi3 + 10] == ('c' as u8) && payload[shi3 + 11] == ('l' as u8) && payload[shi3 + 12] == ('o' as u8) && payload[shi3 + 13] == ('u' as u8) && payload[shi3 + 14] == ('d' as u8) && payload[shi3 + 15] == ('/' as u8) {
+                    sec_path_kind = 3
+                }
+                shi3 = shi3 + 1
+            }
+            // .netrc / .npmrc / .pypirc — boundary-anchored
+            let mut shi4: usize = cmd_start
+            while shi4 + 6 <= cmd_end {
+                let mut nb: Bool = false
+                if shi4 == cmd_start {
+                    nb = true
+                } else {
+                    let nprev: u8 = payload[shi4 - 1]
+                    if nprev == ('/' as u8) || nprev == (' ' as u8) || nprev == ('=' as u8) {
+                        nb = true
+                    }
+                }
+                if nb {
+                    if shi4 + 6 <= cmd_end && payload[shi4] == ('.' as u8) && payload[shi4 + 1] == ('n' as u8) && payload[shi4 + 2] == ('e' as u8) && payload[shi4 + 3] == ('t' as u8) && payload[shi4 + 4] == ('r' as u8) && payload[shi4 + 5] == ('c' as u8) {
+                        sec_path_kind = 4
+                    }
+                    if shi4 + 6 <= cmd_end && payload[shi4] == ('.' as u8) && payload[shi4 + 1] == ('n' as u8) && payload[shi4 + 2] == ('p' as u8) && payload[shi4 + 3] == ('m' as u8) && payload[shi4 + 4] == ('r' as u8) && payload[shi4 + 5] == ('c' as u8) {
+                        sec_path_kind = 4
+                    }
+                    if shi4 + 7 <= cmd_end && payload[shi4] == ('.' as u8) && payload[shi4 + 1] == ('p' as u8) && payload[shi4 + 2] == ('y' as u8) && payload[shi4 + 3] == ('p' as u8) && payload[shi4 + 4] == ('i' as u8) && payload[shi4 + 5] == ('r' as u8) && payload[shi4 + 6] == ('c' as u8) {
+                        sec_path_kind = 4
+                    }
+                }
+                shi4 = shi4 + 1
+            }
+
             // ===== Classifier pass (mirrors `agentguard risk`) =====
             // Run rules in priority order. First match wins. The risk
             // subcommand and this hook adapter must stay in sync — when
             // adding a new classifier rule, add it in BOTH places (or
             // refactor once Zero MVP backend supports helper functions
             // taking byte-view ranges).
+
+            // SEC006 — shell-mediated secret reads. Highest priority
+            // because secret exfil is the most dangerous outcome.
+            if chain_has_reader && sec_path_kind != 0 {
+                if 1 == sec_path_kind {
+                    if 1 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a .env file.\",\"agent_message\":\"This is the same surface as SEC001 — you tried to read a .env file via shell instead of a file-read. Do not retry with another tool. Ask the user for the specific key value.\"}\n")
+                        return
+                    }
+                    if 2 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a .env file.\",\"agent_message\":\"BLOCKED: shell-mediated .env read. Do NOT pipe, source, cat, grep, or otherwise extract these. Ask the user for the specific value.\"}\n")
+                        return
+                    }
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a .env file.\",\"agent_message\":\"This .env shell-read is blocked. Ask the user for the specific value you need.\"}\n")
+                    return
+                }
+                if 2 == sec_path_kind {
+                    if 1 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading an SSH private key.\",\"agent_message\":\"Same surface as SEC002 via shell — denied. Do not copy, encode, or pipe the key. If you need a fingerprint, ask the user to run ssh-keygen -lf themselves.\"}\n")
+                        return
+                    }
+                    if 2 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading an SSH private key.\",\"agent_message\":\"BLOCKED: SSH private key shell-read. Do NOT exfiltrate. Ask the user to operate on the key themselves.\"}\n")
+                        return
+                    }
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading an SSH private key.\",\"agent_message\":\"This SSH key shell-read is blocked. Ask the user to run any key check themselves.\"}\n")
+                    return
+                }
+                if 3 == sec_path_kind {
+                    if 1 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a cloud credential file.\",\"agent_message\":\"Same surface as SEC003 via shell — denied. Do not propose grep/awk/sed alternatives. Ask the user for the specific profile or value.\"}\n")
+                        return
+                    }
+                    if 2 == model_family {
+                        check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a cloud credential file.\",\"agent_message\":\"BLOCKED: cloud-cred shell-read. Do NOT extract via any tool. Ask user for the specific value.\"}\n")
+                        return
+                    }
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a cloud credential file.\",\"agent_message\":\"This cloud-cred shell-read is blocked. Ask the user for any specific value you need.\"}\n")
+                    return
+                }
+                if 4 == sec_path_kind {
+                    check world.out.write("{\"permission\":\"deny\",\"user_message\":\"AgentGuard SEC006: shell command is reading a credential file (.netrc/.npmrc/.pypirc).\",\"agent_message\":\"This shell-mediated credential read is blocked. These files contain auth tokens. Ask the user for any specific value you need.\"}\n")
+                    return
+                }
+            }
 
             // CMD008 — terraform destroy. Block.
             // 17 bytes: "terraform destroy" (front-anchored OR mid-chain).
@@ -692,14 +985,43 @@ pub fun main(world: World) -> Void raises {
                 is_destructive = true
             }
             if is_destructive {
-                // Only run the workspace-escape (CMD003) refinement when
-                // the rm -rf is the leading token of the command. For
-                // mid-chain rm -rf the target offset is unknown; treat
-                // it as CMD002 destructive (notify), not CMD003.
+                // Run the workspace-escape (CMD003) refinement on
+                // whichever rm -rf we found:
+                //   - front-anchored: target at cmd_start + 7
+                //   - mid-chain: target at chain_rm_rf_target_offset
+                // The chain scanner records the position right after
+                // "rm -rf " when it finds a boundary-anchored match.
+                let mut tgt: usize = 0
+                let mut have_target: Bool = false
                 if is_destructive_front_anchored && clen >= 8 {
-                    let target_first: u8 = payload[cmd_start + 7]
-                    let tgt: usize = cmd_start + 7
-                    let tgt_remaining: usize = cmd_end - tgt
+                    tgt = cmd_start + 7
+                    have_target = true
+                }
+                if is_destructive_front_anchored == false && chain_has_rm_rf {
+                    if chain_rm_rf_target_offset + 1 <= cmd_end {
+                        tgt = chain_rm_rf_target_offset
+                        have_target = true
+                    }
+                }
+                if have_target {
+                    let target_first: u8 = payload[tgt]
+                    // Walk to end of target: first space, separator, or
+                    // string end. For front-anchored rm -rf this matches
+                    // the existing semantics (target ends at cmd_end);
+                    // for mid-chain rm -rf this scopes the analysis
+                    // to just the rm-rf argument, not the rest of the
+                    // chain.
+                    let mut tgt_end: usize = tgt
+                    let mut tgt_done: Bool = false
+                    while tgt_end < cmd_end && tgt_done == false {
+                        let tb: u8 = payload[tgt_end]
+                        if tb == (' ' as u8) || tb == (';' as u8) || tb == ('|' as u8) || tb == ('&' as u8) || tb == ('\n' as u8) {
+                            tgt_done = true
+                        } else {
+                            tgt_end = tgt_end + 1
+                        }
+                    }
+                    let tgt_remaining: usize = tgt_end - tgt
                     if target_first == ('~' as u8) || target_first == ('/' as u8) {
                         is_escape = true
                     }
@@ -1291,7 +1613,7 @@ pub fun main(world: World) -> Void raises {
             check world.out.write("{\"version\":1,\"hooks\":{")
             check world.out.write("\"beforeShellExecution\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event beforeShellExecution\",\"timeout\":5000}],")
             check world.out.write("\"beforeReadFile\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event beforeReadFile\",\"timeout\":5000}],")
-            check world.out.write("\"afterFileEdit\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event afterFileEdit --log-only\",\"timeout\":5000}],")
+            check world.out.write("\"afterFileEdit\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event afterFileEdit\",\"timeout\":5000}],")
             check world.out.write("\"afterShellExecution\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event afterShellExecution --log-only\",\"timeout\":5000}],")
             check world.out.write("\"stop\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event stop\",\"timeout\":5000}],")
             check world.out.write("\"sessionStart\":[{\"command\":\"/Users/harsha/Developer/agentguard/bin/agentguard hook --host cursor --event sessionStart --log-only\",\"timeout\":5000}],")

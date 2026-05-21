@@ -44,7 +44,10 @@ else
 fi
 
 # Decision-bearing events do NOT have --log-only.
-for evt in beforeShellExecution beforeReadFile stop; do
+# afterFileEdit is included here too because it has side-effects
+# (changed-files marker + protected-path bypass detection) even though
+# Cursor doesn't expect a permission response from it.
+for evt in beforeShellExecution beforeReadFile stop afterFileEdit; do
   cmd=$(echo "$frag" | jq -r ".hooks.$evt[0].command")
   if [[ "$cmd" == *"--log-only"* ]]; then
     echo "FAIL: $evt should NOT have --log-only (got: $cmd)" >&2
@@ -56,7 +59,7 @@ for evt in beforeShellExecution beforeReadFile stop; do
 done
 
 # Capture-only events DO have --log-only.
-for evt in afterFileEdit afterShellExecution sessionStart sessionEnd; do
+for evt in afterShellExecution sessionStart sessionEnd; do
   cmd=$(echo "$frag" | jq -r ".hooks.$evt[0].command")
   if [[ "$cmd" == *"--log-only"* ]]; then
     echo "  ok: $evt is log-only"
@@ -122,6 +125,37 @@ else
   echo "FAIL: hooks no-subcommand should error" >&2
   FAIL=$((FAIL + 1))
 fi
+
+# Plugin file (plugins/cursor/hooks.json) must structurally match what
+# the binary emits, modulo the command path being PATH-relative
+# (`agentguard ...`) instead of the binary-emitted absolute path. This
+# prevents marketplace plugin installs from wiring different hooks
+# than the binary's hooks-install would.
+plugin_keys=$(jq -r '.hooks | keys | join(",")' plugins/cursor/hooks.json | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+binary_keys=$(echo "$frag" | jq -r '.hooks | keys | join(",")' | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+if [[ "$plugin_keys" == "$binary_keys" ]]; then
+  echo "  ok: plugin file has same event set as binary emit"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: plugin/binary disagree on event set" >&2
+  echo "  plugin: $plugin_keys" >&2
+  echo "  binary: $binary_keys" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# Same --log-only annotation on the same set of events.
+for evt in beforeShellExecution beforeReadFile stop afterFileEdit afterShellExecution sessionStart sessionEnd; do
+  bin_log=$(echo "$frag" | jq -r ".hooks.$evt[0].command" | grep -c -- "--log-only" || true)
+  plug_log=$(jq -r ".hooks.$evt[0].command" plugins/cursor/hooks.json | grep -c -- "--log-only" || true)
+  if [[ "$bin_log" == "$plug_log" ]]; then
+    : # ok
+  else
+    echo "FAIL: plugin/binary disagree on --log-only for $evt (binary=$bin_log plugin=$plug_log)" >&2
+    FAIL=$((FAIL + 1))
+  fi
+done
+echo "  ok: plugin file matches binary --log-only annotations"
+PASS=$((PASS + 1))
 
 echo
 echo "hooks-install: $PASS passed, $FAIL failed"

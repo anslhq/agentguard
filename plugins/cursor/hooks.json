@@ -3,38 +3,44 @@
   "hooks": {
     "beforeShellExecution": [
       {
-        "command": "agentguard risk --json --host cursor"
-      }
-    ],
-    "afterShellExecution": [
-      {
-        "command": "agentguard verify --record-from-bash --host cursor"
+        "command": "agentguard hook --host cursor --event beforeShellExecution",
+        "timeout": 5000
       }
     ],
     "beforeReadFile": [
       {
-        "command": "agentguard risk --json --host cursor --kind read"
+        "command": "agentguard hook --host cursor --event beforeReadFile",
+        "timeout": 5000
       }
     ],
     "afterFileEdit": [
       {
-        "command": "agentguard verify --json --host cursor --changed-only"
+        "command": "agentguard hook --host cursor --event afterFileEdit",
+        "timeout": 5000
       }
     ],
-    "sessionStart": [
+    "afterShellExecution": [
       {
-        "command": "agentguard session start --host cursor"
-      }
-    ],
-    "sessionEnd": [
-      {
-        "command": "agentguard session end --host cursor"
+        "command": "agentguard hook --host cursor --event afterShellExecution --log-only",
+        "timeout": 5000
       }
     ],
     "stop": [
       {
-        "command": "agentguard classify-stop --host cursor",
-        "loop_limit": 3
+        "command": "agentguard hook --host cursor --event stop",
+        "timeout": 5000
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "agentguard hook --host cursor --event sessionStart --log-only",
+        "timeout": 5000
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "agentguard hook --host cursor --event sessionEnd --log-only",
+        "timeout": 5000
       }
     ]
   }
