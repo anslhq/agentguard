@@ -380,22 +380,65 @@ unrelated Cursor conversations across other projects.
 
 ### Upstream patches landed in the local compiler (cumulative)
 
-1. `IR_VALUE_BYTE_VIEW_EQ` — `std.mem.eql` / `std.mem.eqlBytes` / `std.crypto.constantTimeEql` on darwin-arm64 Mach-O. ~55 LOC. Verified 8/8 runtime tests.
-2. `IR_VALUE_FS_EXISTS` / `IR_VALUE_FS_IS_DIR` / `IR_VALUE_FS_MAKE_DIR` / `IR_VALUE_FS_REMOVE` / `IR_VALUE_FS_REMOVE_DIR` — routed through `_zero_fs_exists(path, len, op)` C runtime helper. ~30 LOC emitter + ~20 LOC shim.
-3. `IR_VALUE_FS_WRITE_PATH` — `std.fs.write(path, data)` routed through `_zero_fs_write_path(path, path_len, data, data_len)` C runtime helper. ~30 LOC emitter + ~15 LOC shim.
-4. `IR_VALUE_FS_READ_PATH` — `std.fs.read(path, buf)` via `_zero_fs_read_path`. ~25 LOC emitter + ~20 LOC shim.
-5. `IR_VALUE_FS_APPEND_BYTES_PATH` — `std.fs.appendBytes(path, bytes)` via `_zero_fs_append_path` (popen + O_APPEND|O_CREAT). ~40 LOC emitter + ~15 LOC shim.
-6. `IR_VALUE_PROC_CAPTURE_SHELL` — `std.proc.captureShell(cmdline, buf)` via `_zero_proc_capture_shell` (popen-based). ~40 LOC emitter + ~25 LOC shim.
+After upstream merged PR #195 ("Adopt row syntax as current surface"),
+the patch set was reorganised to match upstream's "direct emitters,
+no shims" direction. Two clean commits landed against the current
+upstream `main` and were submitted as PR
+[#203](https://github.com/vercel-labs/zerolang/pull/203):
 
-All patches are in `zerolang/native/zero-c/src/emit_macho64.c`. The runtime shims are in `runtime/zero_runtime.c`. Combined diff is ~220 LOC across the compiler and ~95 LOC in the runtime.
+1. **Wire Mach-O direct backend for std.mem.eql and path-form std.fs
+   helpers.** Lowers everything inline (no runtime helper):
+   - `IR_VALUE_BYTE_VIEW_EQ` — AArch64 byte-by-byte compare.
+   - `IR_VALUE_FS_EXISTS` / `FS_IS_DIR` / `FS_MAKE_DIR` /
+     `FS_REMOVE` / `FS_REMOVE_DIR` — `SYS_access`, `SYS_stat64`,
+     `SYS_mkdir`, `SYS_unlink`, `SYS_rmdir` via `svc #0x80` with
+     Darwin error convention (carry flag).
+   - `IR_VALUE_FS_WRITE_PATH` / `FS_WRITE_BYTES_PATH` /
+     `FS_READ_PATH` / `FS_READ_BYTES_PATH` — inline open/read/write/
+     close sequences. Darwin flags: `O_WRONLY|O_CREAT|O_TRUNC =
+     0x601`; `O_WRONLY|O_CREAT|O_APPEND = 0x209`.
+2. **Add `std.fs.appendBytes`.** New opcode `IR_VALUE_FS_APPEND_BYTES_PATH`
+   reserved in the IR. Lowered on both ELF64 and Mach-O by reusing
+   the write codepath with `O_APPEND`. Includes
+   `conformance/native/pass/std-fs-append.0`.
+
+AgentGuard-local additions (not in the upstream PR, kept locally
+because the inline syscall design for shell capture is large enough
+to warrant its own upstream conversation):
+
+3. `IR_VALUE_PROC_CAPTURE_SHELL` — `std.proc.captureShell(cmdline,
+   buf) -> Maybe<usize>` via `_zero_proc_capture_shell` runtime
+   helper using libc `popen()`. AgentGuard uses this to capture
+   `git diff --name-only HEAD` into the lease sidecar.
+
+The Layer-1 inline-syscall patches live in
+`zerolang/native/zero-c/src/emit_macho64.c` (no runtime shim
+needed). The Layer-2 `captureShell` patch lives in `emit_macho64.c`
+plus `zerolang/native/zero-c/runtime/zero_runtime.c`.
+
+### Row-syntax migration blocker
+
+Upstream PR #195 merged a new `.0` surface syntax. AgentGuard's
+`src/main.0` is still written in the previous parenthesized surface
+and currently cannot be parsed by a compiler built from the current
+upstream `main` (PAR100). The shipped `bin/agentguard` was built
+against a pre-row-syntax compiler revision and continues to run
+end-to-end (15/15 test suites pass). Porting `main.0` to row syntax
+is open work; see STATUS.md for the practical bootstrap options
+today.
 
 ### Working compiler path (current)
 
-For any AgentGuard `.0` build that uses `std.mem.eql` or `std.fs.*`, **use the locally-built compiler** at `zerolang/bin/zero` because the upstream binary at `~/.zero/bin/zero` is missing the Mach-O patches. Build via `scripts/build.sh` which handles the `--emit obj + cc link` path automatically:
+For any AgentGuard `.0` build that uses `std.mem.eql`, `std.fs.*`,
+or `std.proc.captureShell`, **use the locally-built compiler** at
+`zerolang/bin/zero` because the upstream binary at
+`~/.zero/bin/zero` is missing both the Mach-O backend wiring and
+the `captureShell` addition. Build via `scripts/build.sh` which
+handles the `--emit obj + cc link` path automatically.
 
-```sh
-cd /Users/harsha/Developer/agentguard
-zerolang/bin/zero build --emit exe --target darwin-arm64 . --out bin/agentguard
-```
-
-The released `~/.zero/bin/zero` remains correct for `zero check --json` (the type-checker is unaffected), which is why the `.cursor/hooks/zero-diagnostics.sh` hook still uses it. Once the patch is upstreamed and a new release ships, both binaries will be equivalent.
+The released `~/.zero/bin/zero` remains correct for
+`zero check --json` against the previous surface, which is why the
+`.cursor/hooks/zero-diagnostics.sh` hook can still use it for
+diagnostics. Once PR #203 merges and a new release ships, the
+Mach-O parity gap closes; `captureShell` would need its own follow-up
+PR to also land upstream.

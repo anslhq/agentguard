@@ -130,74 +130,85 @@ These items will not progress without Zero v0.1.4+ ABI improvements:
 ## Zero compiler bootstrap
 
 The vendored `zerolang/` source is gitignored in this repo. It lives
-alongside agentguard as a separate git checkout of
-`https://github.com/vercel-labs/zerolang`. The patches that make
-AgentGuard's binary buildable are organised as two clean commits on
-a branch named `agentguard-mach-o-direct-backend`, intended for an
-upstream PR. Each commit is single-concern, build-clean, and adds
-its own conformance coverage.
+alongside agentguard as a separate git checkout. Two patch layers
+make AgentGuard's binary buildable, plus an unresolved upstream
+syntax migration that constrains how rebuilds work today.
 
-### Commit 1 — Mach-O direct backend support for existing stdlib APIs
+### Layer 1 — Upstream PR
 
-Adds direct-backend lowering for APIs that previously only worked
-through the object backend on darwin-arm64:
+Two single-concern, build-clean commits sit on the
+`agentguard-mach-o-direct-backend` branch of
+`https://github.com/anslhq/zerolang` and were submitted to
+`vercel-labs/zerolang` as PR
+[#203](https://github.com/vercel-labs/zerolang/pull/203):
 
-- `IR_VALUE_BYTE_VIEW_EQ` — `std.mem.eql` / `std.mem.eqlBytes` /
-  `std.crypto.constantTimeEql`. Inline AArch64 byte-by-byte compare;
-  no runtime shim needed.
-- `IR_VALUE_FS_EXISTS` family — `std.fs.{exists, isDir, makeDir,
-  remove, removeDir}` via `zero_fs_exists(path, len, op)` runtime
-  helper.
-- `IR_VALUE_FS_WRITE_PATH` / `IR_VALUE_FS_WRITE_BYTES_PATH` —
-  `std.fs.{write, writeBytes}` via `zero_fs_write_path`.
-- `IR_VALUE_FS_READ_PATH` — `std.fs.read(path, buf)` via
-  `zero_fs_read_path`.
+1. *Wire Mach-O direct backend for std.mem.eql and path-form std.fs
+   helpers.* Lowers `IR_VALUE_BYTE_VIEW_EQ`, the FS exists / is_dir /
+   make_dir / remove / remove_dir family, and the FS write / read
+   path family to inline AArch64 syscalls via `svc #0x80`. No runtime
+   helper, no extra link plan — matches upstream's ELF64 design.
 
-The runtime shim functions live in
-`zerolang/native/zero-c/runtime/zero_runtime.c` (upstream's runtime),
-with declarations in `zero_runtime.h`. Windows is stubbed to return
-0 honestly.
+2. *Add `std.fs.appendBytes`.* New stdlib API returning
+   `Maybe<usize>`, lowered on both ELF64 and Mach-O by reusing the
+   write codepath with `O_APPEND`. Includes a conformance test under
+   `conformance/native/pass/std-fs-append.0`.
 
-### Commit 2 — New stdlib APIs
+Verification on the PR branch:
 
-Adds two new library functions:
-
-- `std.fs.appendBytes(path, bytes) -> Maybe<usize>` — opens with
-  `O_WRONLY | O_CREAT | O_APPEND`, returns bytes written.
-  - `IR_VALUE_FS_APPEND_BYTES_PATH`
-  - ELF64: inlined open/write/close (analogous to write)
-  - Mach-O direct: routed via `zero_fs_append_path`
-- `std.proc.captureShell(cmdline, buf) -> Maybe<usize>` — runs
-  `/bin/sh -c <cmdline>` via libc `popen()`, captures up to
-  `buf.len` bytes of stdout. Stderr dropped; exit code not
-  returned.
-  - `IR_VALUE_PROC_CAPTURE_SHELL`
-  - ELF64: emits CGEN004 (deliberately unsupported pending an
-    inline fork/exec/pipe or equivalent runtime helper for ELF)
-  - Mach-O direct: routed via `zero_proc_capture_shell`
-
-Conformance tests added at
-`zerolang/conformance/native/pass/std-fs-append.0` and
-`zerolang/conformance/native/pass/std-proc-capture-shell.0`.
-
-### Verification
-
-- Upstream zerolang conformance: **141/141** type-check pass (139
-  existing + 2 new).
-- AgentGuard's own test suite: **15/15** with 0 failures.
+- `pnpm run conformance:local` — provenance guardrails, type core
+  smoke, MIR verifier smoke, row syntax smoke, conformance all ok
+  (146/146 native pass, including the new `std-fs-append`).
+- `pnpm run native:test:local` — `http runtime smoke ok`,
+  `native conformance ok`.
+- `pnpm run command-contracts:local` — snapshots ok.
+- `pnpm run docs:test` — 7/7 pass.
+- `pnpm run test:zero` — 10/10 pass.
+- `pnpm run zls -- --self-test` — ok.
+- `pnpm run reliability:smoke` — ok.
 - Compiler builds clean with `-std=c11 -Wall -Wextra -Wpedantic -Os`.
-- Runtime builds clean with the same flags.
 
-### Bootstrap reality today
+### Layer 2 — AgentGuard-local additions (not in the upstream PR)
 
-Cloning AgentGuard alone is still insufficient — the patched
-zerolang isn't vendored or referenced from this repo. To rebuild
-AgentGuard you currently need a sibling checkout of upstream
-zerolang with the two patches applied. A future `scripts/bootstrap.sh`
-that clones zerolang, checks out a known-good commit, applies the
-two patches, and builds the compiler would close that gap. For now
-the patches exist as commits on a branch ready to be force-pushed
-to a fork and turned into a PR.
+AgentGuard uses `std.proc.captureShell(cmdline, buf) -> Maybe<usize>`
+to capture `git diff --name-only HEAD` into the lease sidecar. That
+opcode is *not* in the upstream PR — the inline `fork + exec + pipe +
+wait` sequence is large enough (~150 instructions on AArch64) that it
+warrants its own design conversation upstream. For now AgentGuard
+carries a local-only addition:
+
+- `IR_VALUE_PROC_CAPTURE_SHELL` reserved in the IR.
+- Lowered through a runtime helper `zero_proc_capture_shell` in
+  `zerolang/native/zero-c/runtime/zero_runtime.c`, implemented with
+  libc `popen()`.
+- ELF64 emits CGEN004 (deliberately unsupported pending an inline
+  or proper helper design).
+- Mach-O direct: routes through the runtime helper via the object
+  backend's link plan.
+
+This addition is what `scripts/build.sh` relies on to produce the
+shipped `bin/agentguard`.
+
+### Layer 3 — Row-syntax migration blocker
+
+Upstream merged PR #195 "Adopt row syntax as current surface" before
+PR #203 landed. AgentGuard's `src/main.0` is still written in the
+previous parenthesized surface and therefore *cannot be parsed* by a
+compiler built from the current upstream `main` (the type checker
+errors with `PAR100: unexpected character in row syntax`).
+
+The currently shipped `bin/agentguard` was built against a
+pre-row-syntax compiler revision and continues to run end-to-end
+(15/15 AgentGuard test suites pass against it). Rebuilding the
+binary from source today requires one of:
+
+- Porting `src/main.0` (~2700 lines) to the new row syntax.
+- Pinning `zerolang/` to a pre-row-syntax revision and re-applying
+  Layer 1 + Layer 2 on top of that revision.
+- Waiting for an upstream porting tool that translates the previous
+  surface mechanically.
+
+This is documented honestly here rather than glossed over because it
+is the practical state of the build path today.
 
 ---
 

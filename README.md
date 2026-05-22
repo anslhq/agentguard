@@ -35,32 +35,43 @@ contract clause.
 
 ### Building from source today (important)
 
-This repo's binary depends on a patched Zero compiler (a small set of
-Mach-O direct-backend opcodes that aren't yet in upstream Zero v0.1.3).
-The patches are organised as two clean, single-concern commits on a
-branch named `agentguard-mach-o-direct-backend` against
-`https://github.com/vercel-labs/zerolang`, suitable for an upstream PR:
+This repo's binary depends on a patched Zero compiler. There are two
+patch layers:
 
-1. **Lower std.mem.eql and path-form std.fs helpers to Mach-O direct backend.**
-   Adds direct-backend lowering for `std.mem.eql`, `std.fs.{exists,
-   isDir, makeDir, remove, removeDir, write, writeBytes, read}` via
-   inline AArch64 plus a runtime shim. No new public APIs.
+1. **Two upstream-ready commits** on the `agentguard-mach-o-direct-backend`
+   branch of `https://github.com/anslhq/zerolang`, submitted to
+   `vercel-labs/zerolang` as PR
+   [#203](https://github.com/vercel-labs/zerolang/pull/203):
 
-2. **Add std.fs.appendBytes and std.proc.captureShell.**
-   New stdlib APIs with full IR + checker + Mach-O emit + ELF (append
-   inline; captureShell deliberately CGEN004 on ELF) + runtime + docs
-   + conformance tests.
+   - *Wire Mach-O direct backend for std.mem.eql and path-form std.fs
+     helpers.* Lowers `IR_VALUE_BYTE_VIEW_EQ`, the FS exists/is_dir/
+     make_dir/remove/remove_dir family, and the FS write/read paths to
+     inline AArch64 syscalls. No runtime helper, no extra link plan.
+   - *Add `std.fs.appendBytes`.* New stdlib API with `Maybe<usize>`
+     return, lowered on both ELF64 and Mach-O by reusing the write
+     codepath with `O_APPEND`. Includes a conformance test.
 
-To rebuild AgentGuard today, you need a sibling checkout of
-upstream zerolang with these two patches applied (alongside this
-repo). A future `scripts/bootstrap.sh` that clones, patches, and
-builds upstream automatically would close that gap. For now the
-patches exist on the branch named above and are documented in
-`STATUS.md` ↳ "Zero compiler bootstrap".
+2. **An AgentGuard-only local patch** (not in the upstream PR) that
+   restores `std.proc.captureShell` and its runtime helper. AgentGuard
+   uses it to capture `git diff --name-only HEAD` into the lease
+   sidecar. Upstream's review of how to land shell-capture cleanly is
+   still open, so AgentGuard maintains this as a local addition for
+   now.
+
+Upstream also migrated `.0` sources to a new "row" syntax. AgentGuard's
+`src/main.0` is still written in the previous surface and therefore
+cannot be rebuilt against the latest `zerolang/main` until it is
+ported. The currently shipped `bin/agentguard` was built against a
+pre-row-syntax compiler revision and continues to run end-to-end (all
+15 test suites pass). Rebuilding from source today requires either
+porting `main.0` to row syntax or pinning the local `zerolang/`
+checkout to a pre-row-syntax revision plus the upstream PR commits.
 
 If you run `./scripts/build.sh` against a stock `~/.zero/bin/zero`
 without the patches applied, you'll hit `CGEN004: direct AArch64
-Mach-O value kind is unsupported`.
+Mach-O value kind is unsupported`. Against the latest upstream
+without porting `main.0`, you'll hit `PAR100: unexpected character in
+row syntax`.
 
 ## Executive Thesis
 
